@@ -48,7 +48,7 @@ import {
   readAgentStrategyNotes,
 } from "../lib/sheets.js";
 import { AGENTS } from "../config/agents.js";
-import { protoSet, protoListPush, protoKey } from "../lib/proto-store.js";
+import { protoGet, protoSet, protoListPush, protoKey } from "../lib/proto-store.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const AGENT_ID = "agent-1";
@@ -166,7 +166,16 @@ export async function runProtoResearchScan({ tickers } = {}) {
   ]);
   const ownedHoldings = projectAgentOwnedHoldings({ agentId: agent.id, lots: verifiedLots, holdings: accountHoldings });
   const researchLedger = await readResearchLedger(agent.id);
-  const persistentMemory = formatAgentMemoriesForPrompt(await listAgentMemories(agent.id));
+  // Real Agent 1 memory (read-only) plus the prototype's OWN lessons on top --
+  // never the other way around, and the prototype never writes production
+  // memory. jobs/proto-feedback.js governs when lessons here become non-empty
+  // (frozen-baseline window, docs/roadmaps/RESEARCH-PROTOTYPE-PLAN-2026-09-23.md).
+  const productionMemory = formatAgentMemoriesForPrompt(await listAgentMemories(agent.id));
+  const feedbackState = await protoGet(protoKey.feedbackState());
+  const protoLessons = feedbackState?.lessons?.length
+    ? `\n\nPrototype-specific lessons from Sam's and his investing partner's grading (Research Testing Prototype only):\n${feedbackState.lessons.map((l) => `- ${l}`).join("\n")}`
+    : "";
+  const persistentMemory = `${productionMemory}${protoLessons}`;
 
   const candidatesForContext = []; // buildAgentReviewContext only needs this for sector-weight lookups; fine empty for a fixed small run
   const reviewContext = await buildAgentReviewContext(sheets, spreadsheetId, {
