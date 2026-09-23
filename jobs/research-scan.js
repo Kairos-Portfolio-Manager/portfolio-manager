@@ -602,7 +602,14 @@ export async function buildCandidate(f, riskLimits, { now, threeMonthsAgo, oneMo
  * ticker (or the next agent's run) doesn't double-queue against a list fetched
  * before the run started.
  */
-export async function buildAgentReviewContext(sheets, spreadsheetId, { candidates, riskLimits, benchmark, heldAllocation = null }) {
+export async function buildAgentReviewContext(sheets, spreadsheetId, {
+  candidates, riskLimits, benchmark, heldAllocation = null,
+  // Injectable, additive (default: the real pm:* caches). A prototype run
+  // supplies proto:* equivalents so market-data cache warming never writes
+  // production state -- Codex's 2026-09-23 round-4 review, P2 finding.
+  macroCacheGet = getCachedMacro, macroCacheSet = setCachedMacro,
+  treasuryCacheGet = getCachedTreasuryYieldChangeBps, treasuryCacheSet = setCachedTreasuryYieldChangeBps,
+}) {
   const benchmarkQuotes = await fetchQuotes([benchmark]);
   const spyEntryPrice = benchmarkQuotes[benchmark]?.regularMarketPrice ?? null;
   // Yahoo's lightweight quote() already reports this — same call as spyEntryPrice
@@ -633,20 +640,20 @@ export async function buildAgentReviewContext(sheets, spreadsheetId, { candidate
     if (sector) sectorWeightPct[sector] = (sectorWeightPct[sector] ?? 0) + weightPct;
   }
 
-  let macroSnapshot = await getCachedMacro();
+  let macroSnapshot = await macroCacheGet();
   if (!macroSnapshot) {
     macroSnapshot = await fetchMacroSnapshot();
-    if (macroSnapshot) await setCachedMacro(macroSnapshot);
+    if (macroSnapshot) await macroCacheSet(macroSnapshot);
   }
   const macroText = formatMacroSnapshot(macroSnapshot);
 
   // Deterministic dual-red macro gate (lib/macro-regime.js): computed here, once
   // per agent run, not left for the AI to derive from raw numbers in a prompt.
-  let treasuryYieldChangeBps = await getCachedTreasuryYieldChangeBps();
+  let treasuryYieldChangeBps = await treasuryCacheGet();
   if (treasuryYieldChangeBps == null) {
     const observations = await fetchTreasuryYieldObservations();
     treasuryYieldChangeBps = computeTreasuryYieldChangeBps(observations);
-    if (treasuryYieldChangeBps != null) await setCachedTreasuryYieldChangeBps(treasuryYieldChangeBps);
+    if (treasuryYieldChangeBps != null) await treasuryCacheSet(treasuryYieldChangeBps);
   }
   const macroRedFlags = evaluateMacroRedFlags({ spyPrice: spyEntryPrice, spySma200, treasuryYieldChangeBps });
 

@@ -9,11 +9,13 @@
 // Per Sam's explicit instruction (2026-09-23): "I want this agent to run exactly
 // how it is running normally, just with a smaller set of tickers." This file
 // therefore reuses the SAME functions the real scheduled scan and the real Lab
-// tool both use (loadAgentConfig, resolveCircuitBreaker, makeDateWindow,
-// buildCandidate, buildAgentReviewContext, reviewCandidateForAgent, sourcedFact),
-// all newly exported from jobs/research-scan.js additively for this purpose. The
-// only deliberate substitution is candidate SOURCING: a fixed ~50-ticker list
-// instead of the discovery/candidate-slate universe.
+// tool both use (loadAgentConfig, makeDateWindow, buildCandidate,
+// buildAgentReviewContext, reviewCandidateForAgent, sourcedFact), all newly
+// exported from jobs/research-scan.js additively for this purpose. The
+// deliberate substitutions are: candidate SOURCING (a fixed ~50-ticker list
+// instead of the discovery/candidate-slate universe), and read-only stand-ins
+// for the two setup functions that write real production state
+// (resolveCircuitBreaker, resolveSharedSpreadsheetId -- see below).
 
 import "dotenv/config";
 import { readFileSync } from "node:fs";
@@ -22,7 +24,6 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import {
   loadAgentConfig,
-  resolveCircuitBreaker,
   makeDateWindow,
   buildCandidate,
   buildAgentReviewContext,
@@ -38,10 +39,9 @@ import { formatAgentMemoriesForPrompt, listAgentMemories } from "../lib/agent-me
 import { readResearchLedger } from "../lib/research-ledger.js";
 import { projectAgentOwnedHoldings } from "../lib/research-holding-ownership.js";
 import { assessPeerCoverage, scorePeerFundamentals } from "../lib/peer-coverage.js";
-import { getPeerMetrics } from "../lib/redis.js";
+import { getPeerMetrics, getBreakerState, getCachedSharedSpreadsheetId } from "../lib/redis.js";
 import {
   getServiceAccountClients,
-  resolveSharedSpreadsheetId,
   readHoldingsAllocation,
   readAllLots,
   readMarketScans,
@@ -72,6 +72,37 @@ async function protoNewsCacheSet(ticker, news) {
 // Route usage telemetry to proto:* instead. Reuses the real pure record
 // builder (buildAnthropicUsageRecord) so the shape/pricing math is identical;
 // only the storage destination changes.
+// Read-only stand-ins for two functions that predated this file and write
+// real production state -- Codex's 2026-09-23 round-4 review, both P1:
+// resolveCircuitBreaker (jobs/research-scan.js) writes pm:hwm:portfolio and
+// pm:breaker:state and can send a real Telegram alert on a tier change;
+// resolveSharedSpreadsheetId (lib/sheets.js) writes pm:shared:spreadsheet-id
+// on a cache miss and calls ensureTabs (can create/modify Sheets tabs) even
+// on a cache hit. Neither is safe to call from a shadow/dry-run job.
+
+/** Reads the last REAL computed breaker tier; never recomputes or writes it. */
+async function protoReadOnlyBreakerState() {
+  const state = await getBreakerState();
+  if (state?.tier) return state;
+  // Fail closed, matching production's own UNKNOWN-blocks-BUYs semantics
+  // (lib/circuit-breaker.js applyBreakerToProposal's default/UNKNOWN case).
+  return { tier: "UNKNOWN", drawdownPct: null, basis: null };
+}
+
+/** Requires an already-cached spreadsheet ID; never creates or seeds tabs. */
+async function protoReadOnlySpreadsheetId() {
+  const spreadsheetId = await getCachedSharedSpreadsheetId();
+  if (!spreadsheetId) {
+    throw new Error("proto-research-scan: no cached shared spreadsheet ID (pm:shared:spreadsheet-id) -- refusing to create/resolve one. Run the real scheduled scan or holdings-sync at least once first.");
+  }
+  return spreadsheetId;
+}
+
+async function protoMacroCacheGet() { return protoGet(protoKey.macroCache()); }
+async function protoMacroCacheSet(snapshot) { return protoSet(protoKey.macroCache(), snapshot, { ex: 6 * 3600 }); }
+async function protoTreasuryCacheGet() { return protoGet(protoKey.treasuryCache()); }
+async function protoTreasuryCacheSet(bps) { return protoSet(protoKey.treasuryCache(), bps, { ex: 6 * 3600 }); }
+
 async function protoRecordUsage(input) {
   const record = buildAnthropicUsageRecord(input);
   await protoListPush(protoKey.usage(), record, { maxLength: 20_000 });
@@ -181,9 +212,9 @@ export async function runProtoResearchScan({ tickers } = {}) {
   // Read-only production context. Realistic sizing/context needs real
   // holdings/cash/macro state -- reading it is not a write, and Sam asked for
   // this to behave like the real pipeline, not a synthetic sandbox.
-  const { sheets, drive } = getServiceAccountClients();
-  const spreadsheetId = await resolveSharedSpreadsheetId(sheets, drive);
-  const breaker = await resolveCircuitBreaker(sheets, spreadsheetId);
+  const { sheets } = getServiceAccountClients();
+  const spreadsheetId = await protoReadOnlySpreadsheetId();
+  const breaker = await protoReadOnlyBreakerState();
   const boundaryToken = makeBoundaryToken();
   const evidenceFlags = [];
   // Deliberately NO real monthlyBudget: createResearchRunBudget still
@@ -221,6 +252,10 @@ export async function runProtoResearchScan({ tickers } = {}) {
     riskLimits,
     benchmark: watchlist.benchmark,
     heldAllocation: accountHoldings,
+    macroCacheGet: protoMacroCacheGet,
+    macroCacheSet: protoMacroCacheSet,
+    treasuryCacheGet: protoTreasuryCacheGet,
+    treasuryCacheSet: protoTreasuryCacheSet,
   });
 
   const ctx = {

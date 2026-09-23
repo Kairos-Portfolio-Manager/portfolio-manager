@@ -158,3 +158,28 @@ test("jobs/proto-research-scan.js and jobs/proto-feedback.js wire recordUsage to
   const feedbackSource = readFileSync("jobs/proto-feedback.js", "utf8");
   assert.match(feedbackSource, /await\s+protoRecordUsage\(/, "jobs/proto-feedback.js's lesson-generation call does not use protoRecordUsage");
 });
+
+test("jobs/proto-research-scan.js never calls the real resolveCircuitBreaker or resolveSharedSpreadsheetId (both write real pm:* state)", () => {
+  // Codex 2026-09-23 round-4, both P1: resolveCircuitBreaker writes
+  // pm:hwm:portfolio/pm:breaker:state and can send a real Telegram alert;
+  // resolveSharedSpreadsheetId writes pm:shared:spreadsheet-id on a cache
+  // miss and calls ensureTabs (can create/modify Sheets tabs) even on a hit.
+  const source = readFileSync("jobs/proto-research-scan.js", "utf8");
+  // Check the actual usage, not prose -- the file's own comments name both
+  // functions to explain why they're avoided, so a bare word match would be
+  // a false positive on its own explanation.
+  assert.doesNotMatch(source, /resolveCircuitBreaker\(/, "must not CALL the real, writing resolveCircuitBreaker -- use the read-only protoReadOnlyBreakerState instead");
+  assert.doesNotMatch(source, /resolveSharedSpreadsheetId\(/, "must not CALL the real, writing resolveSharedSpreadsheetId -- use the read-only protoReadOnlySpreadsheetId instead");
+  assert.doesNotMatch(source, /import\s*\{[^}]*\bresolveCircuitBreaker\b/, "must not import the real resolveCircuitBreaker");
+  assert.doesNotMatch(source, /import\s*\{[^}]*\bresolveSharedSpreadsheetId\b/, "must not import the real resolveSharedSpreadsheetId");
+  assert.match(source, /getBreakerState/, "protoReadOnlyBreakerState should read the real breaker state (read-only), not fabricate one");
+  assert.match(source, /getCachedSharedSpreadsheetId/, "protoReadOnlySpreadsheetId should read the real cached ID (read-only), not resolve/create one");
+});
+
+test("jobs/proto-research-scan.js redirects buildAgentReviewContext's macro/treasury caches to proto:*", () => {
+  const source = readFileSync("jobs/proto-research-scan.js", "utf8");
+  assert.match(source, /macroCacheGet:\s*protoMacroCacheGet/, "macroCacheGet is not wired to the proto:* cache");
+  assert.match(source, /macroCacheSet:\s*protoMacroCacheSet/, "macroCacheSet is not wired to the proto:* cache");
+  assert.match(source, /treasuryCacheGet:\s*protoTreasuryCacheGet/, "treasuryCacheGet is not wired to the proto:* cache");
+  assert.match(source, /treasuryCacheSet:\s*protoTreasuryCacheSet/, "treasuryCacheSet is not wired to the proto:* cache");
+});

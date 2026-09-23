@@ -41,19 +41,30 @@ const realTavily = await import("../lib/tavily.js");
 const realEdgar = await import("../lib/edgar.js");
 const realShadowAdapter = await import("../lib/agent4-shadow-adapter.js");
 
+// Codex 2026-09-23 round-4: source pins alone don't prove
+// callGeneratorForAgent/callEvaluatorForAgent actually FORWARD ctx.recordUsage
+// to getAIRecommendation/evaluateProposal -- these mocks capture whatever
+// recordUsage argument they actually received so the tests below can assert
+// it's the exact function buildCtx supplied, not the real default.
+let generatorReceivedRecordUsage;
+let evaluatorReceivedRecordUsage;
+
 mock.module("../lib/ai-overlay.js", {
   exports: {
     ...realAiOverlay,
-    getAIRecommendation: async () => ({
-      action: "BUY",
-      targetWeight: 8,
-      confidence: 0.7,
-      thesis: "Test fixture thesis for the dry-run isolation regression test.",
-      risks: ["Test fixture risk."],
-      killCriteria: ["Test fixture kill criterion A.", "Test fixture kill criterion B."],
-      buyDossier: { thesis: "Test fixture thesis.", valuationScenario: {}, bearCase: "Test bear case.", killCriteria: ["A", "B"], horizon: "weeks", sizingRationale: "test" },
-      overrideNotes: [],
-    }),
+    getAIRecommendation: async ({ recordUsage } = {}) => {
+      generatorReceivedRecordUsage = recordUsage;
+      return {
+        action: "BUY",
+        targetWeight: 8,
+        confidence: 0.7,
+        thesis: "Test fixture thesis for the dry-run isolation regression test.",
+        risks: ["Test fixture risk."],
+        killCriteria: ["Test fixture kill criterion A.", "Test fixture kill criterion B."],
+        buyDossier: { thesis: "Test fixture thesis.", valuationScenario: {}, bearCase: "Test bear case.", killCriteria: ["A", "B"], horizon: "weeks", sizingRationale: "test" },
+        overrideNotes: [],
+      };
+    },
     enforceFractionalShareHoldPolicy: async (proposal) => ({ proposal, retried: false, initialViolations: [], repeatedViolations: [] }),
   },
 });
@@ -61,7 +72,10 @@ mock.module("../lib/ai-overlay.js", {
 mock.module("../lib/evaluator.js", {
   exports: {
     ...realEvaluator,
-    evaluateProposal: async () => ({ verdict: "APPROVE", critique: [], suspectEvidence: [] }),
+    evaluateProposal: async ({ recordUsage } = {}) => {
+      evaluatorReceivedRecordUsage = recordUsage;
+      return { verdict: "APPROVE", critique: [], suspectEvidence: [] };
+    },
     resolveFinalVerdict: (first) => ({ ...first, revisions: 0 }),
   },
 });
@@ -98,6 +112,7 @@ const { AGENTS } = await import("../config/agents.js");
 
 let protoNewsCacheGetCalls = 0;
 let protoNewsCacheSetCalls = 0;
+async function PROTO_RECORD_USAGE_MARKER() { throw new Error("marker function -- should never actually be invoked in this test"); }
 
 function buildCtx({ dryRun }) {
   const agentConfig = loadAgentConfig("agent-2");
@@ -133,6 +148,10 @@ function buildCtx({ dryRun }) {
     // supplies its own spies to prove the redirection actually happens.
     newsCacheGet: async () => { protoNewsCacheGetCalls += 1; return null; },
     newsCacheSet: async () => { protoNewsCacheSetCalls += 1; },
+    // Marker function -- identity comparison in the test below proves this
+    // EXACT function reached getAIRecommendation/evaluateProposal, not just
+    // that ctx.recordUsage was set.
+    recordUsage: PROTO_RECORD_USAGE_MARKER,
   };
 }
 
@@ -171,6 +190,12 @@ test("dry-run isolation: ctx.dryRun=true reaches the proposal branch but NEVER c
   assert.equal(realNewsCacheCalls, 0, "the real pm:news:* cache was touched even though ctx supplied an override");
   assert.equal(protoNewsCacheGetCalls, 1, "ctx.newsCacheGet was not called");
   assert.equal(protoNewsCacheSetCalls, 1, "ctx.newsCacheSet was not called (cache-miss path should call it once)");
+
+  // Codex round-4 P2: prove callGeneratorForAgent/callEvaluatorForAgent
+  // actually FORWARD ctx.recordUsage to the real functions' recordUsage
+  // parameter -- identity check, not just "some value was passed".
+  assert.equal(generatorReceivedRecordUsage, PROTO_RECORD_USAGE_MARKER, "getAIRecommendation did not receive ctx.recordUsage");
+  assert.equal(evaluatorReceivedRecordUsage, PROTO_RECORD_USAGE_MARKER, "evaluateProposal did not receive ctx.recordUsage");
 
   // And the dry-run result still looks like a completed, gradable outcome.
   assert.equal(result.createdProposal?.dryRun, true);
