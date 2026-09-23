@@ -758,11 +758,18 @@ export async function reviewCandidateForAgent(agent, c, ctx) {
   }
 
   // News is a market fact too — shared cache by ticker is fine and saves Tavily quota across agents.
-  let news = await getCachedNews(c.ticker);
+  // ctx.newsCacheGet/newsCacheSet are injectable (default: the real pm:news:*
+  // cache) so a dry run can redirect this transitive write instead of
+  // touching production state -- flagged by Codex's 2026-09-23 review: the
+  // prototype's own proto:* isolation tests cannot see this call because it
+  // lives here, not in a proto-*.js file.
+  const newsCacheGet = ctx.newsCacheGet ?? getCachedNews;
+  const newsCacheSet = ctx.newsCacheSet ?? setCachedNews;
+  let news = await newsCacheGet(c.ticker);
   if (!news) {
     try {
       news = await tavilySearch(`${c.ticker} ${c.name} stock news`, { maxResults: 3, days: 7 });
-      await setCachedNews(c.ticker, news);
+      await newsCacheSet(c.ticker, news);
     } catch (err) {
       console.warn(`[Research] ${agent.id}: Tavily search failed for ${c.ticker}:`, err.message);
       news = []; // don't cache — let the next ticker/run retry instead of masking an outage for 12h

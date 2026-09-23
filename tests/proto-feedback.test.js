@@ -36,15 +36,30 @@ test("summarizeGrades computes rates and averages only over valid grades", () =>
   ];
   const summary = summarizeGrades(grades);
   assert.equal(summary.gradedCount, 2);
+  assert.equal(summary.distinctProposalCount, 2);
   assert.equal(summary.avgScore, 4);
   assert.equal(summary.wouldApproveRate, 0.5);
   assert.equal(summary.reasoningSoundRate, 1);
   assert.equal(summary.missedSomethingRate, 0.5);
 });
 
+test("summarizeGrades: distinctProposalCount counts proposals, not grade submissions -- both graders on one proposal count as one", () => {
+  // Codex 2026-09-23: using gradedCount for the frozen-baseline window let two
+  // graders on 10 proposals (20 grade rows) close a 20-proposal window early.
+  const grades = [
+    grade({ proposalId: "p1", grader: "sam" }),
+    grade({ proposalId: "p1", grader: "partner" }),
+    grade({ proposalId: "p2", grader: "sam" }),
+  ];
+  const summary = summarizeGrades(grades);
+  assert.equal(summary.gradedCount, 3, "3 grade submissions");
+  assert.equal(summary.distinctProposalCount, 2, "but only 2 distinct proposals");
+});
+
 test("summarizeGrades with zero valid grades returns nulls, not NaN or a crash", () => {
   const summary = summarizeGrades([]);
   assert.equal(summary.gradedCount, 0);
+  assert.equal(summary.distinctProposalCount, 0);
   assert.equal(summary.avgScore, null);
   assert.equal(summary.wouldApproveRate, null);
 });

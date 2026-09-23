@@ -38,6 +38,10 @@ const FORBIDDEN_REDIS_WRITE_FUNCTIONS = [
   "setUniverseStatus",
   "setPeerMetrics",
   "setMandateScores",
+  // Not money-path, but a real write to the SAME shared production queue the
+  // scheduled scan's limited enrichment capacity draws from -- Codex flagged
+  // 2026-09-23 that repeated prototype scans could displace real coverage.
+  "requestPeerCoverage",
   "setLabResearchStatus", // the EXISTING dashboard "Lab" feature's own status key -- never touch it
 ];
 
@@ -106,4 +110,15 @@ test("no proto-* file imports a money-path or production-status WRITE function f
       );
     }
   }
+});
+
+test("jobs/proto-research-scan.js redirects reviewCandidateForAgent's news cache to proto:* (never real pm:news:*)", () => {
+  // Source-level pin, cheap regression guard for the transitive pm:news:*
+  // write Codex flagged 2026-09-23 -- tests/proto-dry-run-isolation.test.js
+  // proves the redirection mechanism itself works; this proves the actual
+  // job wires it up rather than leaving reviewCandidateForAgent to fall back
+  // to the real cache by omission.
+  const source = readFileSync("jobs/proto-research-scan.js", "utf8");
+  assert.match(source, /newsCacheGet:\s*protoNewsCacheGet/, "ctx.newsCacheGet is not wired to the proto:* cache");
+  assert.match(source, /newsCacheSet:\s*protoNewsCacheSet/, "ctx.newsCacheSet is not wired to the proto:* cache");
 });

@@ -13,6 +13,7 @@
 // small, already-shared text-parsing utility.
 
 import "dotenv/config";
+import { fileURLToPath } from "node:url";
 import Anthropic from "@anthropic-ai/sdk";
 import { parseWeeklyLessons } from "../lib/weekly-scorecard.js";
 import { summarizeGrades, formatGradeSummaryForPrompt, isFrozenBaselineWindowOpen } from "../lib/proto-feedback.js";
@@ -83,7 +84,7 @@ export async function runProtoFeedbackCycle({ now = new Date().toISOString() } =
   const state = (await protoGet(protoKey.feedbackState())) ?? { firstRunAt: now, lessons: [] };
   if (!state.firstRunAt) state.firstRunAt = now;
 
-  const windowOpen = isFrozenBaselineWindowOpen({ firstRunAt: state.firstRunAt, gradedCount: summary.gradedCount, now });
+  const windowOpen = isFrozenBaselineWindowOpen({ firstRunAt: state.firstRunAt, gradedCount: summary.distinctProposalCount, now });
 
   const result = {
     computedAt: now,
@@ -111,7 +112,7 @@ export async function runProtoFeedbackCycle({ now = new Date().toISOString() } =
   return result;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (fileURLToPath(import.meta.url) === process.argv[1]) {
   runProtoFeedbackCycle()
     .then((result) => { console.log(JSON.stringify(result, null, 2)); process.exit(0); })
     .catch((err) => { console.error("[ProtoFeedback] cycle failed:", err); process.exit(1); });

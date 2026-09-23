@@ -38,7 +38,7 @@ import { formatAgentMemoriesForPrompt, listAgentMemories } from "../lib/agent-me
 import { readResearchLedger } from "../lib/research-ledger.js";
 import { projectAgentOwnedHoldings } from "../lib/research-holding-ownership.js";
 import { assessPeerCoverage, scorePeerFundamentals } from "../lib/peer-coverage.js";
-import { getPeerMetrics, requestPeerCoverage } from "../lib/redis.js";
+import { getPeerMetrics } from "../lib/redis.js";
 import {
   getServiceAccountClients,
   resolveSharedSpreadsheetId,
@@ -49,6 +49,17 @@ import {
 } from "../lib/sheets.js";
 import { AGENTS } from "../config/agents.js";
 import { protoGet, protoSet, protoListPush, protoKey } from "../lib/proto-store.js";
+
+// Isolation, per Codex's 2026-09-23 review: reviewCandidateForAgent's news
+// cache (getCachedNews/setCachedNews) writes a real pm:news:* key by default.
+// Redirect it to a proto:* equivalent instead -- still cached (saves Tavily
+// quota across runs), never touches production state.
+async function protoNewsCacheGet(ticker) {
+  return protoGet(protoKey.newsCache(ticker));
+}
+async function protoNewsCacheSet(ticker, news) {
+  return protoSet(protoKey.newsCache(ticker), news);
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const AGENT_ID = "agent-1";
@@ -87,10 +98,13 @@ async function researchOneTickerDryRun(symbol, { agent, agentConfig, ctx }) {
     peerMetrics,
   });
   if (!peerCoverage.ready) {
-    // Read-only widening of the SAME production peer-coverage request queue the
-    // scheduled scan uses -- this is a request for more data, not a write of
-    // prototype state, and it's exactly what "run normally" means for coverage.
-    await requestPeerCoverage({ ticker: symbol, industry: fundamentals.industry ?? null, sector: fundamentals.sector ?? null, source: "proto" });
+    // Deliberately NOT calling requestPeerCoverage here (removed 2026-09-23
+    // per Codex review): it writes to the SAME shared production
+    // peer-coverage queue the scheduled scan's limited enrichment capacity
+    // draws from, and repeated prototype scans of an incomplete/placeholder
+    // universe could displace real research coverage. Coverage still accrues
+    // naturally from production's own nightly cycle; the prototype just
+    // reports what isn't ready yet rather than accelerating it.
     return {
       ticker: symbol,
       outcome: "peer_coverage_pending",
@@ -203,6 +217,8 @@ export async function runProtoResearchScan({ tickers } = {}) {
     athenaCircuit: createAthenaCircuit(),
     budget,
     dryRun: true, // the whole point -- see reviewCandidateForAgent in research-scan.js
+    newsCacheGet: protoNewsCacheGet,
+    newsCacheSet: protoNewsCacheSet,
   };
 
   const results = [];
@@ -250,7 +266,11 @@ export async function runProtoResearchScan({ tickers } = {}) {
 }
 
 // Manual/on-demand invocation for testing: `node jobs/proto-research-scan.js`
-if (import.meta.url === `file://${process.argv[1]}`) {
+// fileURLToPath(), not a raw `file://${...}` template -- this Mac's paths
+// contain spaces ("All Claude Projects"), which import.meta.url URL-encodes
+// and process.argv[1] does not; the naive comparison silently never matches
+// (documented mistake class in Feedback/portfolio-manager-code-lessons.md).
+if (fileURLToPath(import.meta.url) === process.argv[1]) {
   runProtoResearchScan()
     .then((receipt) => {
       console.log(JSON.stringify(receipt, null, 2));
