@@ -150,34 +150,71 @@ branch:   claude/research-lab-2026-09-23   (directory/branch names kept as-is;
   data will also exercise this path directly (watch for `[dry run] would queue...`
   log lines and confirm zero writes to `pm:proposal:*`).
 
-### 4. Wire the prototype scan job -- NOT STARTED
-- `jobs/proto-research-scan.js`: build a `ctx` the same way `researchTickerForAgentUnlocked`
+### 4. Wire the prototype scan job -- DONE, commit `b37fe3d`
+- `jobs/proto-research-scan.js` builds `ctx` the same way `researchTickerForAgentUnlocked`
   does (agent config, circuit breaker, boundary token, budget, holdings/lots read
-  for context, research ledger) but source candidates from a fixed ticker list
-  (`config/proto/universe.json`, placeholder until Sam+partner pick names) instead of
-  `buildSlate`/candidate-slate, set `ctx.dryRun = true`, and loop
-  `reviewCandidateForAgent` per ticker. Persist every result to `proto:*` via
-  `lib/proto-store.js` -- full evidence dump, not a summary, per Sam's explicit ask.
-- Needs real per-metric timestamp provenance threaded through so the Q-002/Q-003
-  freshness fix actually resolves `"fresh"` instead of staying `"policy_unresolved"`
-  (`lib/proto-freshness-provenance.js`, not started).
-- Own cadence (multiple runs/day), own cron registration -- NOT in production's
-  `scheduler.js`.
+  for context, research ledger, real macro/holdings context) but sources candidates
+  from `config/proto/universe.json` (**placeholder 50 tickers -- Sam+partner still
+  need to pick the real list**) instead of `buildSlate`/candidate-slate, sets
+  `ctx.dryRun = true`, and loops `reviewCandidateForAgent` per ticker. Persists every
+  result (including data-unavailable / peer-coverage-pending / errored tickers, not
+  just reviewed ones) to `proto:*` via `lib/proto-store.js`.
+- Own cadence: no cron registered yet, no scheduler wiring -- currently manual
+  (`node jobs/proto-research-scan.js`). Multiple-scans/day cron scheduling is a
+  small remaining task, deliberately left for after real tickers/threshold land so
+  it isn't scheduled against placeholder data.
+- **Still open:** real per-metric timestamp provenance is not threaded through, so
+  the Q-002/Q-003 freshness fix built in step 2 resolves `"policy_unresolved"`
+  rather than `"fresh"`/`"stale"` for every candidate this job scores today. This
+  is a real gap, not cosmetic -- it means `complete`/`actionable` on the underlying
+  observation contract still can't be reached from this job's output alone, though
+  it's not blocking for the prototype's actual purpose (Sam/partner grade the
+  *proposal itself*, not the mechanical completeness flag).
+- **Not run against live data yet** -- needs real Sheets/Redis credentials and an
+  Anthropic API key, neither present in the build environment. Import resolution,
+  syntax, and the dry-run branch logic are verified; a real end-to-end run against
+  live data is the next actual verification step, not yet done.
 
-### 5. Grading + feedback loop -- NOT STARTED
-- Dashboard write path: Sam and partner each grade a proposal.
-- `lib/proto-feedback.js`: same shape as production's `weekly-scorecard.js`, scoped
-  to `proto:weekly-review` keys, with the frozen-baseline-window flag described above.
+### 5. Grading + feedback loop -- DONE, commit `2b8d28e`
+- `lib/proto-feedback.js`: pure grade validation/aggregation (`isValidGrade`,
+  `summarizeGrades`) and `isFrozenBaselineWindowOpen` (first ~14 days or ~20 graded
+  proposals, whichever comes first). 9/9 unit tests.
+- `jobs/proto-feedback.js`: orchestration -- reads all `proto:*` grades, always
+  stores the summary, calls the model (reusing `parseWeeklyLessons`) only once the
+  window closes. `jobs/proto-research-scan.js` reads the resulting lessons and
+  layers them on top of real (read-only) Agent 1 production memory.
+- **Not run against live data yet** -- same credential gap as step 4.
 
-### 6. Dashboard -- NOT STARTED
-Minimum fields per proposal: ticker, action, stated confidence, full raw evidence
-with per-metric freshness/coverage, the model's own stated gaps, evaluator verdict,
-both graders' scores/comments, and a trend view (volume, evaluator approval rate,
-grade distribution over time).
+### 6. Dashboard -- DONE, commit `20b45d3`
+- `proto-dashboard/` -- standalone `node:http` server (port 3201, separate from
+  production's 3200), single-page vanilla-JS UI. No Express dependency, no Clerk
+  auth, no shared route namespace with the existing Lab feature or the production
+  dashboard repo.
+- Per proposal: ticker, action badge (would-BUY/would-SELL/HOLD/data-unavailable
+  etc.), quant score, evaluator verdict, full rationale text, and an inline grading
+  form (grader, would-approve, reasoning-sound, missed-something, 1-5 score,
+  comment) with existing grades shown per proposal.
+- Summary bar: graded-proposal count, average score, would-approve rate, active
+  lesson count, feedback-window status.
+- **Verified locally** with the server running and mocked API responses: empty
+  state renders (screenshot), run/proposal cards render correctly with realistic
+  fixture data (screenshot), and the grade-submit click-to-save interaction works
+  end to end in the browser. **Not verified against a real save-and-reload with
+  live Redis** -- no credentials in this environment; the persistence path itself
+  is covered by `tests/proto-store-isolation.test.js` and code review, not a live
+  round-trip check. That live check is a real remaining task.
+- **Not yet built:** the trend view (volume/approval-rate/grade-distribution over
+  time) mentioned in the original spec -- the summary bar covers the all-time
+  aggregate but not a time series. Small addition once there's enough real run
+  history to make a trend chart meaningful.
+- **Not deployed anywhere** -- runs locally via `node proto-dashboard/server.js`.
+  Where this should actually live long-term (Jetson PM2, a laptop, somewhere else)
+  is a deployment decision for Sam, not made here.
 
-### 7. Claude visibility -- NOT STARTED
+### 7. Claude visibility -- DONE, commit `f307b9c`
 `scripts/proto-export.js`: read-only markdown/JSON snapshot of recent proposals,
 grades, and trend stats, same pattern as the ops "measure agent coverage" script.
+Verified it runs cleanly with no Redis configured (prints the correct empty state).
 
 ## Explicit non-goals / do not touch
 
