@@ -61,6 +61,14 @@ test("protoGet/protoDel degrade gracefully with no Redis configured (never throw
   await assert.doesNotReject(() => protoDel("proto:config"));
 });
 
+test("protoSet accepts an optional TTL ({ ex }) without breaking the default no-TTL call shape", async () => {
+  // No Redis configured -> both calls throw "Redis not configured" (writes
+  // fail loudly), but they must fail for THAT reason, not a TypeError from
+  // the new destructured third parameter.
+  await assert.rejects(() => protoSet("proto:x", 1), /Redis not configured/);
+  await assert.rejects(() => protoSet("proto:x", 1, { ex: 3600 }), /Redis not configured/);
+});
+
 test("every named key helper produces a proto:-prefixed key", () => {
   const samples = [
     protoKey.universe(),
@@ -121,4 +129,32 @@ test("jobs/proto-research-scan.js redirects reviewCandidateForAgent's news cache
   const source = readFileSync("jobs/proto-research-scan.js", "utf8");
   assert.match(source, /newsCacheGet:\s*protoNewsCacheGet/, "ctx.newsCacheGet is not wired to the proto:* cache");
   assert.match(source, /newsCacheSet:\s*protoNewsCacheSet/, "ctx.newsCacheSet is not wired to the proto:* cache");
+});
+
+test("no proto-* file imports the real recordAnthropicUsage or createAnthropicMonthlyBudget (both write/read shared production budget state)", () => {
+  // Codex's 2026-09-23 round-3 finding: getAIRecommendation/evaluateProposal
+  // both record to real pm:anthropic-usage:* by default, which the SHARED
+  // production monthly budget reads -- prototype spend could exhaust it and
+  // make the real scheduled scan fail closed. buildAnthropicUsageRecord (the
+  // pure record builder, no Redis) is fine and expected; recordAnthropicUsage
+  // (the real Redis writer) and createAnthropicMonthlyBudget (the real shared
+  // budget reader/writer) are not.
+  const protoFiles = [
+    ...readdirSync("lib").filter((f) => f.startsWith("proto-")).map((f) => `lib/${f}`),
+    ...readdirSync("jobs").filter((f) => f.startsWith("proto-")).map((f) => `jobs/${f}`),
+  ];
+  for (const file of protoFiles) {
+    const source = readFileSync(file, "utf8");
+    assert.doesNotMatch(source, /import\s*\{[^}]*\brecordAnthropicUsage\b[^}]*\}\s*from\s*["'][^"']*anthropic-usage\.js["']/, `${file} imports the real recordAnthropicUsage -- use buildAnthropicUsageRecord + protoListPush(protoKey.usage()) instead`);
+    assert.doesNotMatch(source, /from\s*["'][^"']*anthropic-monthly-budget\.js["']/, `${file} imports createAnthropicMonthlyBudget -- never pass a real monthlyBudget into createResearchRunBudget for the prototype`);
+  }
+});
+
+test("jobs/proto-research-scan.js and jobs/proto-feedback.js wire recordUsage to proto-scoped telemetry, and the scan job never constructs a real monthlyBudget", () => {
+  const scanSource = readFileSync("jobs/proto-research-scan.js", "utf8");
+  assert.match(scanSource, /recordUsage:\s*protoRecordUsage/, "jobs/proto-research-scan.js ctx does not wire recordUsage to protoRecordUsage");
+  assert.doesNotMatch(scanSource, /createResearchRunBudget\(\s*\{\s*monthlyBudget/, "jobs/proto-research-scan.js still passes a monthlyBudget into createResearchRunBudget");
+
+  const feedbackSource = readFileSync("jobs/proto-feedback.js", "utf8");
+  assert.match(feedbackSource, /await\s+protoRecordUsage\(/, "jobs/proto-feedback.js's lesson-generation call does not use protoRecordUsage");
 });

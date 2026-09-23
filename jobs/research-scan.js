@@ -166,6 +166,7 @@ async function callGeneratorForAgent(agentId, input, ctx) {
       ...input,
       agentId,
       budget: ctx.budget,
+      recordUsage: ctx.recordUsage,
     });
     if (counts) counts.succeeded += 1;
     return result;
@@ -183,6 +184,7 @@ async function callEvaluatorForAgent(agentId, input, ctx) {
       ...input,
       agentId,
       budget: ctx.budget,
+      recordUsage: ctx.recordUsage,
     });
     if (counts) counts.succeeded += 1;
     return result;

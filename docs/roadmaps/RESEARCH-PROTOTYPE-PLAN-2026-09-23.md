@@ -185,31 +185,42 @@ branch:   claude/research-lab-2026-09-23   (directory/branch names kept as-is;
   layers them on top of real (read-only) Agent 1 production memory.
 - **Not run against live data yet** -- same credential gap as step 4.
 
-### 6. Dashboard -- DONE, commit `20b45d3`
-- `proto-dashboard/` -- standalone `node:http` server (port 3201, separate from
-  production's 3200), single-page vanilla-JS UI. No Express dependency, no Clerk
-  auth, no shared route namespace with the existing Lab feature or the production
-  dashboard repo.
-- Per proposal: ticker, action badge (would-BUY/would-SELL/HOLD/data-unavailable
-  etc.), quant score, evaluator verdict, full rationale text, and an inline grading
-  form (grader, would-approve, reasoning-sound, missed-something, 1-5 score,
-  comment) with existing grades shown per proposal.
-- Summary bar: graded-proposal count, average score, would-approve rate, active
-  lesson count, feedback-window status.
-- **Verified locally** with the server running and mocked API responses: empty
-  state renders (screenshot), run/proposal cards render correctly with realistic
-  fixture data (screenshot), and the grade-submit click-to-save interaction works
-  end to end in the browser. **Not verified against a real save-and-reload with
-  live Redis** -- no credentials in this environment; the persistence path itself
-  is covered by `tests/proto-store-isolation.test.js` and code review, not a live
-  round-trip check. That live check is a real remaining task.
-- **Not yet built:** the trend view (volume/approval-rate/grade-distribution over
-  time) mentioned in the original spec -- the summary bar covers the all-time
-  aggregate but not a time series. Small addition once there's enough real run
-  history to make a trend chart meaningful.
-- **Not deployed anywhere** -- runs locally via `node proto-dashboard/server.js`.
-  Where this should actually live long-term (Jetson PM2, a laptop, somewhere else)
-  is a deployment decision for Sam, not made here.
+### 6. Dashboard -- DONE, but NOT in this repo (superseded design, see below)
+
+**Revised 2026-09-23:** the original plan (and commit `20b45d3`) built a standalone
+`node:http` server inside this repo at `proto-dashboard/` (port 3201). Sam then asked
+for a real Vercel-hosted dashboard with password protection instead, and Codex's
+round-2 review separately flagged the local server's `/api/grades` as unauthenticated.
+**`proto-dashboard/` was deleted from this repo in commit `8f7dbdc`.** It is not a
+local entry point anymore -- do not tell anyone to run `node proto-dashboard/server.js`.
+
+The real dashboard now lives in a **separate repository and deployment**:
+- Repo: `~/All Claude Projects/proto-dashboard` (its own git history, own `package.json`,
+  Next.js on Vercel). Not a subdirectory of this backend repo.
+- Live URL: `https://proto-dashboard-pi.vercel.app` (Vercel project
+  `samuelhuffard-9533s-projects/proto-dashboard`).
+- Auth: `proxy.js` gates every route except `/login` behind a `PROTO_DASHBOARD_PASSWORD`
+  cookie check (set in Vercel project env vars). If that env var is unset, the app is
+  open with no gate at all -- Sam confirmed this is acceptable until he sets a password
+  himself ("I'm not worried about anyone getting into it").
+- Data access: hand-synced copies of `lib/proto-store.js` and `lib/proto-feedback.js`
+  (kept small on purpose, same reasoning as this repo's originals) reading/writing the
+  SAME Upstash Redis instance via `UPSTASH_REDIS_REST_URL`/`UPSTASH_REDIS_REST_TOKEN`
+  set as Vercel Production+Preview env vars. **Keep both copies in sync by hand** when
+  either `proto:*` schema changes -- there is no cross-repo contracts package for this,
+  deliberately, for a prototype tool this small.
+- Per proposal: ticker, action badge, quant score, evaluator verdict, full rationale
+  text, inline grading form (grader, would-approve, reasoning-sound, missed-something,
+  1-5 score, comment), existing grades shown per proposal. Summary bar: distinct
+  graded-proposal count, average score, would-approve rate, active lesson count,
+  feedback-window status.
+- **Verified:** clean `next build`; local `next dev` run confirming the password gate
+  redirects/accepts correctly and renders the dashboard; deployed to Vercel production
+  and confirmed live (`curl .../api/summary` returns real Redis-backed empty state, not
+  an error) -- this is a genuine live connection to the same Redis the backend uses.
+- **Not yet built:** the trend view (volume/approval-rate/grade-distribution over time)
+  from the original spec -- the summary bar covers the all-time aggregate, not a time
+  series. Small addition once there's enough real run history to make it meaningful.
 
 ### 7. Claude visibility -- DONE, commit `f307b9c`
 `scripts/proto-export.js`: read-only markdown/JSON snapshot of recent proposals,

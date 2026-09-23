@@ -17,8 +17,17 @@ import { fileURLToPath } from "node:url";
 import Anthropic from "@anthropic-ai/sdk";
 import { parseWeeklyLessons } from "../lib/weekly-scorecard.js";
 import { summarizeGrades, formatGradeSummaryForPrompt, isFrozenBaselineWindowOpen } from "../lib/proto-feedback.js";
-import { protoGet, protoSet, protoListRange, protoKey } from "../lib/proto-store.js";
-import { recordAnthropicUsage } from "../lib/anthropic-usage.js";
+import { protoGet, protoSet, protoListRange, protoListPush, protoKey } from "../lib/proto-store.js";
+import { buildAnthropicUsageRecord } from "../lib/anthropic-usage.js";
+
+// Isolation, per Codex's 2026-09-23 round-3 review (jobs/proto-research-scan.js
+// has the full rationale): route usage telemetry to proto:*, never the real
+// pm:anthropic-usage:* the shared production monthly budget reads.
+async function protoRecordUsage(input) {
+  const record = buildAnthropicUsageRecord(input);
+  await protoListPush(protoKey.usage(), record, { maxLength: 20_000 });
+  return { record, persisted: true, error: null };
+}
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY?.trim(), maxRetries: 0 });
 const PROTO_FEEDBACK_MODEL = "claude-sonnet-4-6";
@@ -55,7 +64,7 @@ export async function generateProtoLessons(summary, existingLessons, { anthropic
     messages: [{ role: "user", content: `${formatGradeSummaryForPrompt(summary)}\n\n${existingBlock}` }],
   };
   const response = await anthropicClient.messages.create(request);
-  await recordAnthropicUsage({
+  await protoRecordUsage({
     role: "proto_feedback",
     agentId: "agent-1",
     model: PROTO_FEEDBACK_MODEL,

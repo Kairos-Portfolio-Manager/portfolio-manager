@@ -32,7 +32,7 @@ import {
 import { fetchFundamentalsBatch } from "../lib/yahoo.js";
 import { makeBoundaryToken } from "../lib/evidence.js";
 import { createResearchRunBudget } from "../lib/ai-budget.js";
-import { createAnthropicMonthlyBudget } from "../lib/anthropic-monthly-budget.js";
+import { buildAnthropicUsageRecord } from "../lib/anthropic-usage.js";
 import { createAthenaCircuit } from "../lib/athena.js";
 import { formatAgentMemoriesForPrompt, listAgentMemories } from "../lib/agent-memory.js";
 import { readResearchLedger } from "../lib/research-ledger.js";
@@ -57,8 +57,25 @@ import { protoGet, protoSet, protoListPush, protoKey } from "../lib/proto-store.
 async function protoNewsCacheGet(ticker) {
   return protoGet(protoKey.newsCache(ticker));
 }
+// Same 12h TTL as the real pm:news:* cache (lib/redis.js: NEWS_CACHE_TTL) --
+// Codex flagged 2026-09-23 that an un-expiring proto cache would let a
+// prototype ticker serve indefinitely stale news as model evidence.
+const PROTO_NEWS_CACHE_TTL_SECONDS = 12 * 3600;
 async function protoNewsCacheSet(ticker, news) {
-  return protoSet(protoKey.newsCache(ticker), news);
+  return protoSet(protoKey.newsCache(ticker), news, { ex: PROTO_NEWS_CACHE_TTL_SECONDS });
+}
+
+// Isolation, per Codex's 2026-09-23 round-3 review: getAIRecommendation and
+// evaluateProposal both record to the real pm:anthropic-usage:* telemetry by
+// default, which is the input to the SHARED production monthly Anthropic
+// budget -- prototype spend could make the real scheduled scan fail closed.
+// Route usage telemetry to proto:* instead. Reuses the real pure record
+// builder (buildAnthropicUsageRecord) so the shape/pricing math is identical;
+// only the storage destination changes.
+async function protoRecordUsage(input) {
+  const record = buildAnthropicUsageRecord(input);
+  await protoListPush(protoKey.usage(), record, { maxLength: 20_000 });
+  return { record, persisted: true, error: null };
 }
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -169,8 +186,15 @@ export async function runProtoResearchScan({ tickers } = {}) {
   const breaker = await resolveCircuitBreaker(sheets, spreadsheetId);
   const boundaryToken = makeBoundaryToken();
   const evidenceFlags = [];
-  const monthlyBudget = createAnthropicMonthlyBudget();
-  const budget = createResearchRunBudget({ monthlyBudget, onWarning: () => {} });
+  // Deliberately NO real monthlyBudget: createResearchRunBudget still
+  // enforces its own local, in-memory per-run dollar cap
+  // (RESEARCH_RUN_MAX_USD, default $3), but omitting monthlyBudget means
+  // authorizeAnthropicCall/settleAnthropicCall never touch the SHARED
+  // production Redis-backed monthly budget (lib/ai-budget.js: "if
+  // (!monthlyBudget) return ..." skips it entirely). Fixed 2026-09-23 per
+  // Codex's finding that prototype spend could exhaust the real budget and
+  // make the scheduled scan fail closed.
+  const budget = createResearchRunBudget({ onWarning: () => {} });
 
   const marketScans = await readMarketScans(sheets, spreadsheetId).catch(() => []);
   const [accountHoldings, verifiedLots, strategyNotes] = await Promise.all([
@@ -217,6 +241,7 @@ export async function runProtoResearchScan({ tickers } = {}) {
     athenaCircuit: createAthenaCircuit(),
     budget,
     dryRun: true, // the whole point -- see reviewCandidateForAgent in research-scan.js
+    recordUsage: protoRecordUsage,
     newsCacheGet: protoNewsCacheGet,
     newsCacheSet: protoNewsCacheSet,
   };
