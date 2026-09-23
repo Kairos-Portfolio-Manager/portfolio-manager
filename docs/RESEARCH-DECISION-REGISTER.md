@@ -90,13 +90,61 @@ This register prevents executor models from inventing rules. Accepted decisions 
 
 ### Q-002 — Current-estimate freshness
 
-- Define the maximum acceptable age of a “current” free-source estimate snapshot for new entries and holdings.
-- **Blocks:** estimate freshness/actionability, not EDGAR data collection.
+- **Status: RESOLVED (Sam, 2026-09-21).** Transcribed 2026-09-23 by Claude from the
+  verbatim decision recorded in `~/Claude Memory/Projects/pm-codex-claude-conversation.md`
+  (2026-09-21 entry "DECISIONS (Sam → both agents): Q-002 settled..."). This is a
+  transcription of an already-made decision, not a new policy call — flagging it as
+  such per Codex's 2026-09-23 review finding that this register lagged the decision
+  and implementation should not get ahead of it. **Sam/Codex: please confirm this
+  transcription is accurate before treating it as fully settled here.**
+- **Decision:** an estimate snapshot is `fresh` only when its provider timestamp is
+  no more than **30 calendar days** old at observation time (Choice C, not the
+  15-minute-bar-anchored Choice C reading originally drafted — see reasoning below).
+  After reported earnings, new company guidance, or a material filing, the prior
+  snapshot is `stale` at the **next regular-market session open** and remains so
+  until a newer provider timestamp is observed (Choice A). A missing or stale
+  required estimate writes `stale`/`unavailable`; the metric is not covered and the
+  candidate cannot be actionable on it (Choice A).
+- **Reasoning for Choice C over stricter bar-anchored alternatives (Claude, accepted
+  by Sam 2026-09-21):** the system has no intraday bar ingestion (`lib/yahoo.js`
+  fetches are all `interval: "1d"`), so a reproducible decision-time reference is
+  delivered by the existing required implementation facts (quote source, timestamp,
+  session label, reference price/time) rather than by bar anchoring. This is a build
+  commitment for infrastructure that exists today, not the strictest theoretical
+  option.
+- **Blocks cleared:** estimate freshness/actionability for `revBeat`/`estimateRevisions`
+  (source: `consensus_snapshot_store`). Implemented in `lib/freshness-policy.js:
+  resolveConsensusFreshness`, wired through `lib/mandate-observation.js`'s optional
+  `metricProvenance` parameter (additive; no existing caller passes it yet, so no
+  behavior changed until one does).
+- **Known coupling, flagged not solved (Claude, 2026-09-21):** the 30-day limit
+  against a 250-names/night enrichment cadence over a ~4,500-name catalog gives
+  roughly a 5-day margin before missed nights start failing names closed for a
+  scheduling reason rather than an investment one. Not a reason to loosen the limit;
+  a reason enrichment cadence needs its own monitoring (Codex's lane).
 
 ### Q-003 — Entry quote and relative-volume freshness
 
-- Define maximum quote age and whether premarket/after-hours timestamps qualify for proposal creation.
-- **Blocks:** exact entry actionability, not historical scoring.
+- **Status: RESOLVED (Sam, 2026-09-21), transcribed 2026-09-23 by Claude —
+  same provenance/confirmation caveat as Q-002 above.**
+- **Decision:** during the regular US session, a proposal needs a quote timestamp no
+  more than **5 minutes old** (Choice A). Outside regular hours, a last-regular-close
+  quote may support `research_only` use but **never** an execution-ready read at
+  proposal-creation time (Choice A) — confirmed safe because execution readiness is
+  evaluated at Sam's approval, not at scan-creation time (docs commit `ae957b2`), so
+  this does not silently mark every scheduled-scan proposal (17:15 ET, always outside
+  regular hours) permanently research-only. Fresh review required at 3%+ move from
+  the research snapshot's reference price (Choice A now; revisit
+  `max(3%, 0.5 × 20-day ATR%)` once ATR coverage is proven — Choice C later).
+  Issuer events (reported earnings, new guidance, material filing) make the proposal
+  research-only until refreshed (Choice A now; Sam noted a maintained issuer+regime
+  list, Choice B, is expected eventually — deferred, not rejected).
+- **Blocks cleared:** exact entry actionability for `peerValuation`
+  (source: `yahoo_quote_summary`). Implemented in `lib/freshness-policy.js:
+  resolveQuoteFreshness`, wired the same additive way as Q-002 above.
+- **Not yet implemented:** the 3%-move re-review trigger and issuer-event
+  invalidation are decided but not wired into any code yet — only the base
+  regular-session/outside-hours age rule is.
 
 ### Q-004 — Consensus and 13F completeness policy
 
