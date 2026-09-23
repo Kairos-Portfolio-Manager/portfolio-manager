@@ -168,11 +168,14 @@ test("jobs/proto-research-scan.js never calls the real resolveCircuitBreaker or 
   // Check the actual usage, not prose -- the file's own comments name both
   // functions to explain why they're avoided, so a bare word match would be
   // a false positive on its own explanation.
-  assert.doesNotMatch(source, /resolveCircuitBreaker\(/, "must not CALL the real, writing resolveCircuitBreaker -- use the read-only protoReadOnlyBreakerState instead");
+  // "computeCircuitBreakerAssessment" does not contain the substring
+  // "resolveCircuitBreaker", so a plain check is unambiguous -- no need for
+  // lookbehind tricks.
+  assert.doesNotMatch(source, /resolveCircuitBreaker\(/, "must not CALL the real, writing resolveCircuitBreaker -- use computeCircuitBreakerAssessment (read-only) instead");
   assert.doesNotMatch(source, /resolveSharedSpreadsheetId\(/, "must not CALL the real, writing resolveSharedSpreadsheetId -- use the read-only protoReadOnlySpreadsheetId instead");
-  assert.doesNotMatch(source, /import\s*\{[^}]*\bresolveCircuitBreaker\b/, "must not import the real resolveCircuitBreaker");
+  assert.doesNotMatch(source, /import\s*\{[^}]*\bresolveCircuitBreaker\b/, "must not import the real, writing resolveCircuitBreaker");
   assert.doesNotMatch(source, /import\s*\{[^}]*\bresolveSharedSpreadsheetId\b/, "must not import the real resolveSharedSpreadsheetId");
-  assert.match(source, /getBreakerState/, "protoReadOnlyBreakerState should read the real breaker state (read-only), not fabricate one");
+  assert.match(source, /computeCircuitBreakerAssessment/, "should use the read-only computeCircuitBreakerAssessment (Codex round-5: cached pm:breaker:state has no freshness guarantee), not a stale cached read");
   assert.match(source, /getCachedSharedSpreadsheetId/, "protoReadOnlySpreadsheetId should read the real cached ID (read-only), not resolve/create one");
 });
 

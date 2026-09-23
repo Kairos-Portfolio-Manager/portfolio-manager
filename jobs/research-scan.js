@@ -253,7 +253,18 @@ export function loadAgentConfig(agentId) {
  * A basis switch resets the high-water mark rather than comparing across units.
  * Telegrams on tier CHANGE only, so a persistent drawdown doesn't spam.
  */
-export async function resolveCircuitBreaker(sheets, spreadsheetId) {
+/**
+ * Read-only breaker computation: reads Performance history + stored HWM and
+ * computes the current assessment via the same pure logic
+ * resolveCircuitBreaker uses, but performs NO writes (no HWM persist, no
+ * breaker-state persist, no Telegram). Extracted 2026-09-23 so the prototype
+ * can get a genuinely CURRENT (not stale-cached) breaker read without any
+ * side effect -- Codex's round-5 finding: reading the cached pm:breaker:state
+ * directly has no freshness guarantee (no TTL, only an advisory updatedAt),
+ * so a stale "NONE" could pass a dry-run BUY the real, freshly-computed
+ * breaker would currently block.
+ */
+export async function computeCircuitBreakerAssessment(sheets, spreadsheetId) {
   let current = null;
   let basis = null;
   let ledgerHighWaterMark = null;
@@ -300,6 +311,11 @@ export async function resolveCircuitBreaker(sheets, spreadsheetId) {
     ? navControl.highWaterMark
     : (stored && stored.basis === basis ? stored.value : null);
   const assessment = assessCircuitBreaker({ current, highWaterMark: priorHwm });
+  return { assessment, basis, navControl, stored };
+}
+
+export async function resolveCircuitBreaker(sheets, spreadsheetId) {
+  const { assessment, basis, navControl, stored } = await computeCircuitBreakerAssessment(sheets, spreadsheetId);
 
   if (assessment.highWaterMark != null && basis) {
     await setPortfolioHighWaterMark({

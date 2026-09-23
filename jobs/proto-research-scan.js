@@ -29,6 +29,7 @@ import {
   buildAgentReviewContext,
   reviewCandidateForAgent,
   sourcedFact,
+  computeCircuitBreakerAssessment,
 } from "./research-scan.js";
 import { fetchFundamentalsBatch } from "../lib/yahoo.js";
 import { makeBoundaryToken } from "../lib/evidence.js";
@@ -39,7 +40,7 @@ import { formatAgentMemoriesForPrompt, listAgentMemories } from "../lib/agent-me
 import { readResearchLedger } from "../lib/research-ledger.js";
 import { projectAgentOwnedHoldings } from "../lib/research-holding-ownership.js";
 import { assessPeerCoverage, scorePeerFundamentals } from "../lib/peer-coverage.js";
-import { getPeerMetrics, getBreakerState, getCachedSharedSpreadsheetId } from "../lib/redis.js";
+import { getPeerMetrics, getCachedSharedSpreadsheetId } from "../lib/redis.js";
 import {
   getServiceAccountClients,
   readHoldingsAllocation,
@@ -80,13 +81,25 @@ async function protoNewsCacheSet(ticker, news) {
 // on a cache miss and calls ensureTabs (can create/modify Sheets tabs) even
 // on a cache hit. Neither is safe to call from a shadow/dry-run job.
 
-/** Reads the last REAL computed breaker tier; never recomputes or writes it. */
-async function protoReadOnlyBreakerState() {
-  const state = await getBreakerState();
-  if (state?.tier) return state;
-  // Fail closed, matching production's own UNKNOWN-blocks-BUYs semantics
-  // (lib/circuit-breaker.js applyBreakerToProposal's default/UNKNOWN case).
-  return { tier: "UNKNOWN", drawdownPct: null, basis: null };
+/**
+ * Genuinely CURRENT breaker tier, computed read-only. Revised 2026-09-23
+ * (Codex round-5): the earlier version read the cached pm:breaker:state
+ * directly, which has no TTL/freshness guarantee -- a stale "NONE" from
+ * before a real drawdown or a missed scheduled scan could pass a dry-run BUY
+ * the real, freshly-computed breaker would currently block. Uses the SAME
+ * read+compute logic resolveCircuitBreaker uses (extracted into
+ * computeCircuitBreakerAssessment), just never persists or alerts on it.
+ */
+async function protoComputeBreakerState(sheets, spreadsheetId) {
+  try {
+    const { assessment } = await computeCircuitBreakerAssessment(sheets, spreadsheetId);
+    return assessment;
+  } catch (err) {
+    console.warn("[ProtoResearchScan] breaker assessment failed, failing closed to UNKNOWN:", err.message);
+    // Fail closed, matching production's own UNKNOWN-blocks-BUYs semantics
+    // (lib/circuit-breaker.js applyBreakerToProposal's default/UNKNOWN case).
+    return { tier: "UNKNOWN", drawdownPct: null, basis: null };
+  }
 }
 
 /** Requires an already-cached spreadsheet ID; never creates or seeds tabs. */
@@ -214,7 +227,7 @@ export async function runProtoResearchScan({ tickers } = {}) {
   // this to behave like the real pipeline, not a synthetic sandbox.
   const { sheets } = getServiceAccountClients();
   const spreadsheetId = await protoReadOnlySpreadsheetId();
-  const breaker = await protoReadOnlyBreakerState();
+  const breaker = await protoComputeBreakerState(sheets, spreadsheetId);
   const boundaryToken = makeBoundaryToken();
   const evidenceFlags = [];
   // Deliberately NO real monthlyBudget: createResearchRunBudget still
