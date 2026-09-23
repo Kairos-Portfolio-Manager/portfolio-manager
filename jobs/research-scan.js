@@ -439,7 +439,7 @@ function toIsoTimestamp(value) {
   return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null;
 }
 
-function sourcedFact(id, label, value, unit, source) {
+export function sourcedFact(id, label, value, unit, source) {
   if (value == null || value === "" || (typeof value === "number" && !Number.isFinite(value))) return null;
   return { id, kind: "raw_fact", label, value, unit, source };
 }
