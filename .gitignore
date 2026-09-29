@@ -31,3 +31,6 @@ ops/phase0-observations/
 # macOS
 .DS_Store
 graphify-out/
+
+# Pitch Lab local data (pitches, outcomes, reports) — see docs/PITCH-LAB.md
+data/pitch-lab/

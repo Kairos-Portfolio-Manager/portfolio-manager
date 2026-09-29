@@ -120,6 +120,11 @@ Files: `lib/sysloop/*` (pure checks — unit-test with fixtures in `tests/sysloo
 Backend: `tests/*.test.js`, node:test, `npm test`. Dashboard: `tests/*.test.ts`, `npm test` (tsx), plus `npm run lint` (= `tsc --noEmit`) and `npm run build`.
 Pattern that works here: money math lives in pure functions (`lib/tax-lots.js`, `proposal-sizing.js`, `mcp-accounting.js`, `risk-engine.js`, `investor-ledger.js`) — put new logic in a pure lib, test it, then wire it into jobs. The mcp-accounting test fixture signs proposals with a test secret (`computeDecisionSignature`) — copy that pattern for anything touching approvals. See `docs/TEST_PLAN.md` for the missing-test priority list.
 
+## Changing the Pitch Lab (paper conviction/metric attribution — inert, not scheduled)
+
+Files: `lib/pitch-lab/` (`features.js` metric catalog, `pitch.js` record + validation, `pitch-prompt.js` model contract, `grading.js`, `analysis.js`, `stats.js`, `store.js`, `render-html.js`, `demo-data.js`), `scripts/pitch-lab.js` (`npm run pitch-lab`), `tests/pitch-lab.test.js`. Design + report contract: `docs/PITCH-LAB.md`.
+Gotchas: never change a feature's definition in place (new id instead) and never edit stored pitches/outcomes (append-only); a change to entry/exit/cost rules bumps `GRADING_VERSION`, a report shape change bumps `REPORT_SCHEMA_VERSION` (the website reads it). Paper only — must never import `lib/redis.js`, `createProposal`, or anything under the execution path.
+
 ## Changing peer-relative scoring (Mandate v2 — Phase A, inert)
 
 The v2 mandates score every metric by percentile rank within the candidate's industry
