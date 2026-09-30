@@ -166,6 +166,7 @@ async function callGeneratorForAgent(agentId, input, ctx) {
       ...input,
       agentId,
       budget: ctx.budget,
+      recordUsage: ctx.recordUsage,
     });
     if (counts) counts.succeeded += 1;
     return result;
@@ -183,6 +184,7 @@ async function callEvaluatorForAgent(agentId, input, ctx) {
       ...input,
       agentId,
       budget: ctx.budget,
+      recordUsage: ctx.recordUsage,
     });
     if (counts) counts.succeeded += 1;
     return result;
@@ -227,7 +229,7 @@ function loadPersonality(dir) {
   return fs.readFileSync(path.join(dir, "personality.md"), "utf8").trim();
 }
 
-function loadAgentConfig(agentId) {
+export function loadAgentConfig(agentId) {
   const dir = path.join(__dirname, "..", "config", "agents", agentId);
   let universe = DEFAULT_UNIVERSE_CONFIG;
   try {
@@ -251,7 +253,18 @@ function loadAgentConfig(agentId) {
  * A basis switch resets the high-water mark rather than comparing across units.
  * Telegrams on tier CHANGE only, so a persistent drawdown doesn't spam.
  */
-async function resolveCircuitBreaker(sheets, spreadsheetId) {
+/**
+ * Read-only breaker computation: reads Performance history + stored HWM and
+ * computes the current assessment via the same pure logic
+ * resolveCircuitBreaker uses, but performs NO writes (no HWM persist, no
+ * breaker-state persist, no Telegram). Extracted 2026-09-23 so the prototype
+ * can get a genuinely CURRENT (not stale-cached) breaker read without any
+ * side effect -- Codex's round-5 finding: reading the cached pm:breaker:state
+ * directly has no freshness guarantee (no TTL, only an advisory updatedAt),
+ * so a stale "NONE" could pass a dry-run BUY the real, freshly-computed
+ * breaker would currently block.
+ */
+export async function computeCircuitBreakerAssessment(sheets, spreadsheetId) {
   let current = null;
   let basis = null;
   let ledgerHighWaterMark = null;
@@ -298,6 +311,11 @@ async function resolveCircuitBreaker(sheets, spreadsheetId) {
     ? navControl.highWaterMark
     : (stored && stored.basis === basis ? stored.value : null);
   const assessment = assessCircuitBreaker({ current, highWaterMark: priorHwm });
+  return { assessment, basis, navControl, stored };
+}
+
+export async function resolveCircuitBreaker(sheets, spreadsheetId) {
+  const { assessment, basis, navControl, stored } = await computeCircuitBreakerAssessment(sheets, spreadsheetId);
 
   if (assessment.highWaterMark != null && basis) {
     await setPortfolioHighWaterMark({
@@ -413,7 +431,7 @@ function applyConvictionClamp(rec, agent, candidate, riskLimits) {
 }
 
 /** Lookback windows used by the candidate builder (momentum + daily-bar history). */
-function makeDateWindow(now = new Date()) {
+export function makeDateWindow(now = new Date()) {
   const threeMonthsAgo = new Date(now);
   threeMonthsAgo.setMonth(now.getMonth() - 3);
   const oneMonthAgo = new Date(now);
@@ -439,7 +457,7 @@ function toIsoTimestamp(value) {
   return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null;
 }
 
-function sourcedFact(id, label, value, unit, source) {
+export function sourcedFact(id, label, value, unit, source) {
   if (value == null || value === "" || (typeof value === "number" && !Number.isFinite(value))) return null;
   return { id, kind: "raw_fact", label, value, unit, source };
 }
@@ -533,7 +551,7 @@ export async function queuePeerCoverageForCandidates(candidates = [], {
  * the scan's candidate loop so the lab single-ticker path builds candidates through
  * the identical code.
  */
-async function buildCandidate(f, riskLimits, { now, threeMonthsAgo, oneMonthAgo, barsHistoryStart }) {
+export async function buildCandidate(f, riskLimits, { now, threeMonthsAgo, oneMonthAgo, barsHistoryStart }) {
   const bars = await fetchDailyBars(f.ticker, { period1: barsHistoryStart, period2: now });
   const closes = bars.map((b) => b.close);
   const closesSince = (cutoff) => bars.filter((b) => new Date(b.date) >= cutoff).map((b) => ({ close: b.close }));
@@ -600,7 +618,14 @@ async function buildCandidate(f, riskLimits, { now, threeMonthsAgo, oneMonthAgo,
  * ticker (or the next agent's run) doesn't double-queue against a list fetched
  * before the run started.
  */
-async function buildAgentReviewContext(sheets, spreadsheetId, { candidates, riskLimits, benchmark, heldAllocation = null }) {
+export async function buildAgentReviewContext(sheets, spreadsheetId, {
+  candidates, riskLimits, benchmark, heldAllocation = null,
+  // Injectable, additive (default: the real pm:* caches). A prototype run
+  // supplies proto:* equivalents so market-data cache warming never writes
+  // production state -- Codex's 2026-09-23 round-4 review, P2 finding.
+  macroCacheGet = getCachedMacro, macroCacheSet = setCachedMacro,
+  treasuryCacheGet = getCachedTreasuryYieldChangeBps, treasuryCacheSet = setCachedTreasuryYieldChangeBps,
+}) {
   const benchmarkQuotes = await fetchQuotes([benchmark]);
   const spyEntryPrice = benchmarkQuotes[benchmark]?.regularMarketPrice ?? null;
   // Yahoo's lightweight quote() already reports this — same call as spyEntryPrice
@@ -631,20 +656,20 @@ async function buildAgentReviewContext(sheets, spreadsheetId, { candidates, risk
     if (sector) sectorWeightPct[sector] = (sectorWeightPct[sector] ?? 0) + weightPct;
   }
 
-  let macroSnapshot = await getCachedMacro();
+  let macroSnapshot = await macroCacheGet();
   if (!macroSnapshot) {
     macroSnapshot = await fetchMacroSnapshot();
-    if (macroSnapshot) await setCachedMacro(macroSnapshot);
+    if (macroSnapshot) await macroCacheSet(macroSnapshot);
   }
   const macroText = formatMacroSnapshot(macroSnapshot);
 
   // Deterministic dual-red macro gate (lib/macro-regime.js): computed here, once
   // per agent run, not left for the AI to derive from raw numbers in a prompt.
-  let treasuryYieldChangeBps = await getCachedTreasuryYieldChangeBps();
+  let treasuryYieldChangeBps = await treasuryCacheGet();
   if (treasuryYieldChangeBps == null) {
     const observations = await fetchTreasuryYieldObservations();
     treasuryYieldChangeBps = computeTreasuryYieldChangeBps(observations);
-    if (treasuryYieldChangeBps != null) await setCachedTreasuryYieldChangeBps(treasuryYieldChangeBps);
+    if (treasuryYieldChangeBps != null) await treasuryCacheSet(treasuryYieldChangeBps);
   }
   const macroRedFlags = evaluateMacroRedFlags({ spyPrice: spyEntryPrice, spySma200, treasuryYieldChangeBps });
 
@@ -695,7 +720,7 @@ async function buildAgentReviewContext(sheets, spreadsheetId, { candidates, risk
  * evaluatorVerdict/noProposalReason are advisory strings for the lab endpoint
  * and never feed back into any money decision.
  */
-async function reviewCandidateForAgent(agent, c, ctx) {
+export async function reviewCandidateForAgent(agent, c, ctx) {
   const { riskLimits } = ctx;
   let createdProposal = null;
   let evaluatorVerdict = null;
@@ -758,11 +783,18 @@ async function reviewCandidateForAgent(agent, c, ctx) {
   }
 
   // News is a market fact too — shared cache by ticker is fine and saves Tavily quota across agents.
-  let news = await getCachedNews(c.ticker);
+  // ctx.newsCacheGet/newsCacheSet are injectable (default: the real pm:news:*
+  // cache) so a dry run can redirect this transitive write instead of
+  // touching production state -- flagged by Codex's 2026-09-23 review: the
+  // prototype's own proto:* isolation tests cannot see this call because it
+  // lives here, not in a proto-*.js file.
+  const newsCacheGet = ctx.newsCacheGet ?? getCachedNews;
+  const newsCacheSet = ctx.newsCacheSet ?? setCachedNews;
+  let news = await newsCacheGet(c.ticker);
   if (!news) {
     try {
       news = await tavilySearch(`${c.ticker} ${c.name} stock news`, { maxResults: 3, days: 7 });
-      await setCachedNews(c.ticker, news);
+      await newsCacheSet(c.ticker, news);
     } catch (err) {
       console.warn(`[Research] ${agent.id}: Tavily search failed for ${c.ticker}:`, err.message);
       news = []; // don't cache — let the next ticker/run retry instead of masking an outage for 12h
@@ -1258,6 +1290,37 @@ async function reviewCandidateForAgent(agent, c, ctx) {
           rec.action === "BUY" ? ` Idle cash remaining before this proposal: $${ctx.availableCashForBuys}.` : ""
         }`;
 
+        const proposalDraft = {
+          agentId: agent.id,
+          ticker: c.ticker,
+          side: rec.action,
+          amountDollars: sized.amountDollars,
+          maxPrice,
+          sellOwnerShareLimit: rec.action === "SELL"
+            ? ctx.ownedPositionSharesByTicker[c.ticker]
+            : null,
+          rationale,
+          riskSummary,
+          buyDossier: rec.action === "BUY" ? rec.buyDossier : undefined,
+          sellDossier: rec.action === "SELL" ? rec.sellDossier : undefined,
+        };
+
+        if (ctx.dryRun) {
+          // Research Testing Prototype path (docs/roadmaps/RESEARCH-PROTOTYPE-PLAN-2026-09-23.md):
+          // identical logic up to this point, but a dry run must never call the
+          // real createProposal() (writes the live approval queue) or the real
+          // Kairos shadow recorder (writes live pm:* state). It gets everything
+          // reviewCandidateForAgent would have queued, without queuing it.
+          const cashAvailableBeforeProposal = ctx.availableCashForBuys;
+          createdProposal = { ...proposalDraft, id: null, status: "DryRun", dryRun: true };
+          proposalDisposition = "would_create";
+          ctx.openProposals.push(createdProposal);
+          if (createdProposal.side === "BUY") {
+            ctx.availableCashForBuys = Math.max(0, Math.round((ctx.availableCashForBuys - createdProposal.amountDollars) * 100) / 100);
+          }
+          console.log(`[Research] ${agent.id}: [dry run] would queue ${rec.action} ${c.ticker} proposal ($${sized.amountDollars}).`);
+          void cashAvailableBeforeProposal; // kept for parity with the live branch's local; no shadow write reads it in dry-run mode
+        } else {
         try {
           const cashAvailableBeforeProposal = ctx.availableCashForBuys;
           const created = await createProposal({
@@ -1310,6 +1373,7 @@ async function reviewCandidateForAgent(agent, c, ctx) {
           console.warn(`[Research] ${agent.id}: failed to queue proposal for ${c.ticker}:`, err.message);
           noProposalReason = `failed to queue proposal: ${err.message}`;
           proposalDisposition = "queue_error";
+        }
         }
       }
     }

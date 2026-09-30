@@ -2,6 +2,38 @@
 
 AI portfolio research + execution backend. **Real money flows through this repo.** Node ESM (no TypeScript syntax in .js), runs on the Jetson under PM2 as `portfolio-manager` (`scheduler.js` → jobs + `server.js` on :3200).
 
+> **On branch `claude/research-lab-2026-09-23`?** You're looking at the
+> **Research Testing Prototype**, not production. Read
+> `docs/roadmaps/RESEARCH-PROTOTYPE-PLAN-2026-09-23.md` first — it's a
+> self-contained plan/status doc (what it is, why it's isolated from
+> production, current build status, what's already been live-tested, what's
+> still open). Everything below this note still applies (it's the same repo,
+> same hard rules) — the prototype reuses production's pipeline as a library
+> rather than replacing any of these rules. Quick orientation:
+> - All prototype code/keys are named `proto-*` / `proto:*`, never `lab` (that
+>   name is taken by an existing, different, real-money-adjacent feature —
+>   see the plan doc's naming-collision section before assuming "Lab" means
+>   this).
+> - `lib/proto-store.js` is the only file allowed to touch Redis for
+>   prototype code, and it refuses any non-`proto:` key at runtime.
+>   `tests/proto-store-isolation.test.js` enforces this and a matching list of
+>   forbidden real-money/production-status writes — read it before adding any
+>   new external call to the prototype's job files.
+> - The dashboard is a **separate repo**: `github.com/samuelhuffard/proto-dashboard`
+>   (Vercel, deployed). Not a route in this repo or in `portfolio-dashboard`.
+> - This branch has been through six rounds of independent (Codex) review —
+>   see `~/Claude Memory/Projects/pm-codex-claude-conversation.md`'s
+>   2026-09-23 entries if you have vault access, otherwise the commit messages
+>   on this branch tell the same story in order. Read them before assuming an
+>   isolation gap doesn't already have a fix — several non-obvious ones did
+>   (a stale-cache freshness bug, a shared Anthropic budget leak, and the
+>   prototype originally calling real production breaker/spreadsheet-ID
+>   functions directly).
+> - Real credentials were used for exactly one live run so far (2026-09-23,
+>   confirmed safe). They are never committed — if you need to run the
+>   prototype for real, get `.env`/`credentials.json` from Sam directly
+>   (not via git/chat), and delete them from your worktree again afterward.
+
 ## Read first
 
 - **Open system-loop findings → `ops/FIXLIST.md`** (auto-generated). At session start, skim "Needs attention" and judge whether anything there should be fixed as part of (or before) the current task — verify against live state first, findings are point-in-time. When you fix one, follow the status/regenerate steps in the file header.

@@ -166,6 +166,38 @@ test("Agent 1 adapter emits a schema-valid partial observation with canonical id
   assert.equal(byId.estimateRevisions.freshnessState, "unavailable");
   assert.equal(byId.thirteenF.freshnessState, "unavailable");
   assert.ok(observation.criticalMissingMetrics.includes("peerValuation"));
+  // Q-004: 13F/institutional-ownership metrics are accepted policy as "required
+  // for full coverage but never blocking" — a missing/non-fresh 13F metric must
+  // not veto actionability the way it did before thesisCritical was per-metric.
+  assert.equal(byId.instOwnershipDir.thesisCritical, false);
+  assert.equal(byId.thirteenF.thesisCritical, false);
+  assert.ok(!observation.criticalMissingMetrics.includes("instOwnershipDir"));
+  assert.ok(!observation.criticalMissingMetrics.includes("thirteenF"));
+});
+
+test("Q-002/Q-003: real per-metric provenance resolves freshnessState instead of staying policy_unresolved", () => {
+  const { observation } = buildAgentOneObservation(recordArgs({
+    metricProvenance: {
+      peerValuation: { quoteTimestamp: "2026-07-13T19:58:00.000Z", now: OBSERVED_AT, inRegularSession: true },
+    },
+  }));
+  const byId = Object.fromEntries(observation.metrics.map((metric) => [metric.metricId, metric]));
+  assert.equal(byId.peerValuation.freshnessState, "fresh");
+  // Fresh + thesis-critical + covered means peerValuation no longer blocks actionability on its own.
+  assert.ok(!observation.criticalMissingMetrics.includes("peerValuation"));
+  // A metric with no resolver policy (revGrowth) is unaffected by unrelated provenance.
+  assert.equal(byId.revGrowth.freshnessState, "policy_unresolved");
+});
+
+test("Q-002/Q-003: stale provenance is reported honestly, not upgraded to fresh", () => {
+  const { observation } = buildAgentOneObservation(recordArgs({
+    metricProvenance: {
+      peerValuation: { quoteTimestamp: "2026-07-13T19:00:00.000Z", now: OBSERVED_AT, inRegularSession: true }, // 60 min old, over the 5-min Q-003 limit
+    },
+  }));
+  const byId = Object.fromEntries(observation.metrics.map((metric) => [metric.metricId, metric]));
+  assert.equal(byId.peerValuation.freshnessState, "stale");
+  assert.ok(observation.criticalMissingMetrics.includes("peerValuation"));
 });
 
 test("adapter fails closed for invalid point-in-time retrieval timestamps", () => {

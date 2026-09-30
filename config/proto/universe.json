@@ -1,0 +1,14 @@
+{
+  "_comment": "Picked by Claude 2026-09-23 to match Agent One's actual mandate (agent_mandates/Agent_One_Mandate_v3.md): short-term high-velocity analyst, sector-agnostic, explicit small/micro-cap capitalization bias ('under-covered names may be an edge'), excludes ADRs/OTC/foreign listings/ETFs/SPACs/pre-revenue biotech. Deliberately NOT mega-cap blue chips -- those are low-velocity, well-covered, and the opposite of what this mandate looks for. Spread across sectors since the mandate is sector-agnostic; REITs/banks/insurers included since the mandate has explicit special-sector substitution rules for them, not an exclusion. Built from public knowledge, not live-verified against the deterministic eligibility screen -- any misclassified/ineligible name simply fails the real screen and returns NO_TRADE, which is safe. Sam + partner may still replace any of these; this is a defensible starting list, not a locked-in decision.",
+  "tickers": [
+    "MDB", "NET", "ZS", "HUBS", "TWLO", "FSLY", "DOCN", "GTLB",
+    "AXON", "FIX", "CSWI", "AAON", "MLI", "RRX",
+    "DECK", "CROX", "YETI", "FIVE", "BOOT", "WING", "CAVA", "ELF",
+    "PODD", "TMDX", "DOCS", "ENSG", "ADUS", "CHE",
+    "SOFI", "COIN", "UPST", "AFRM", "WAL", "CATY",
+    "MTDR", "CTRA", "RRC", "AR",
+    "MOS", "CF", "ALB",
+    "TTD", "ROKU", "PINS", "MTCH",
+    "CUBE", "STAG", "IRT", "RYN", "EXR"
+  ]
+}

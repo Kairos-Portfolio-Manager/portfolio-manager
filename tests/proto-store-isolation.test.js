@@ -1,0 +1,188 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync, readdirSync } from "node:fs";
+
+/**
+ * Isolation guard for the Research Testing Prototype (docs/roadmaps/RESEARCH-PROTOTYPE-PLAN-2026-09-23.md).
+ *
+ * The whole point of "same repo, isolated data" is that a bug in prototype code
+ * cannot touch a `pm:*` key, create a real proposal, or write anything a real
+ * production observer (Sysloop, Phase 0) would mistake for a real run.
+ * lib/proto-store.js enforces the `proto:*` guard at runtime; these tests pin
+ * that guard's behavior AND assert that no proto-* file imports a money-path or
+ * production-status WRITE function from lib/redis.js -- mirrors the
+ * 2026-09-21 universe-refresh incident (an injection seam existed for
+ * everything except the store, and the store call bypassed it).
+ *
+ * Read-only and shared-queue functions (getPeerMetrics, getUniverseCatalog,
+ * requestPeerCoverage) are deliberately NOT forbidden -- jobs/proto-research-scan.js
+ * legitimately reads production's peer-metrics cache and widens the SAME shared
+ * peer-coverage request queue the real Lab tool and the scheduled scan both use.
+ * That is a request for more shared data, not a write of money-path or
+ * prototype-identifying state, so it is allowed. Only writes that a) create real
+ * proposals/orders, b) mutate risk/breaker state, or c) write production
+ * scan-status keys another job or observer reads as ground truth are forbidden.
+ */
+const FORBIDDEN_REDIS_WRITE_FUNCTIONS = [
+  "createProposal",
+  "setBreakerState",
+  "setPortfolioHighWaterMark",
+  "setResearchScanStatus",
+  "setResearchDataStatus",
+  "setShadowSelectionStatus",
+  "setSlateSnapshot",
+  "setPrivateResearchSlate",
+  "setAgentParityRuntimeSummary",
+  "setInvestorUpdate",
+  "setUniverseCatalog",
+  "setUniverseStatus",
+  "setPeerMetrics",
+  "setMandateScores",
+  // Not money-path, but a real write to the SAME shared production queue the
+  // scheduled scan's limited enrichment capacity draws from -- Codex flagged
+  // 2026-09-23 that repeated prototype scans could displace real coverage.
+  "requestPeerCoverage",
+  "setLabResearchStatus", // the EXISTING dashboard "Lab" feature's own status key -- never touch it
+];
+
+import { protoGet, protoSet, protoDel, protoListPush, protoListRange, protoKeys, protoKey } from "../lib/proto-store.js";
+
+test("proto-store refuses any key that is not prefixed proto:", async () => {
+  await assert.rejects(() => protoGet("pm:universe:meta"), /refuses a non-"proto:" key/);
+  await assert.rejects(() => protoSet("pm:research-slate:private:agent-1", {}), /refuses a non-"proto:" key/);
+  await assert.rejects(() => protoDel("pm:hwm:portfolio"), /refuses a non-"proto:" key/);
+  await assert.rejects(() => protoListPush("pm:something", 1), /refuses a non-"proto:" key/);
+});
+
+test("protoGet/protoDel degrade gracefully with no Redis configured (never throw on read)", async () => {
+  // getRedis() returns null when UPSTASH_* env vars are absent, which is the
+  // state of this worktree by design (no .env). Reads must not throw.
+  assert.equal(await protoGet("proto:config"), null);
+  await assert.doesNotReject(() => protoDel("proto:config"));
+});
+
+test("protoSet accepts an optional TTL ({ ex }) without breaking the default no-TTL call shape", async () => {
+  // No Redis configured -> both calls throw "Redis not configured" (writes
+  // fail loudly), but they must fail for THAT reason, not a TypeError from
+  // the new destructured third parameter.
+  await assert.rejects(() => protoSet("proto:x", 1), /Redis not configured/);
+  await assert.rejects(() => protoSet("proto:x", 1, { ex: 3600 }), /Redis not configured/);
+});
+
+test("every named key helper produces a proto:-prefixed key", () => {
+  const samples = [
+    protoKey.universe(),
+    protoKey.config(),
+    protoKey.runReceipt("run-1"),
+    protoKey.runList(),
+    protoKey.proposal("p-1"),
+    protoKey.proposalsByRun("run-1"),
+    protoKey.proposalsAll(),
+    protoKey.grade("p-1", "sam"),
+    protoKey.gradesByProposal("p-1"),
+    protoKey.weeklyLessons("2026-W39"),
+    protoKey.feedbackState(),
+  ];
+  for (const key of samples) assert.ok(key.startsWith("proto:"), key);
+});
+
+test("proto-store.js is the only file under lib/ or jobs/ that imports @upstash/redis directly", () => {
+  const protoFiles = [
+    ...readdirSync("lib").filter((f) => f.startsWith("proto-")).map((f) => `lib/${f}`),
+    ...readdirSync("jobs").filter((f) => f.startsWith("proto-")).map((f) => `jobs/${f}`),
+  ].filter((f) => f !== "lib/proto-store.js");
+  for (const file of protoFiles) {
+    const source = readFileSync(file, "utf8");
+    assert.doesNotMatch(
+      source,
+      /from\s+["']@upstash\/redis["']/,
+      `${file} must not import @upstash/redis directly -- go through lib/proto-store.js`,
+    );
+  }
+});
+
+test("no proto-* file imports a money-path or production-status WRITE function from lib/redis.js", () => {
+  const protoFiles = [
+    ...readdirSync("lib").filter((f) => f.startsWith("proto-")).map((f) => `lib/${f}`),
+    ...readdirSync("jobs").filter((f) => f.startsWith("proto-")).map((f) => `jobs/${f}`),
+  ].filter((f) => f !== "lib/proto-store.js");
+  for (const file of protoFiles) {
+    const source = readFileSync(file, "utf8");
+    const redisImportMatch = source.match(/import\s*\{([^}]*)\}\s*from\s*["'][^"']*\/redis\.js["']/);
+    if (!redisImportMatch) continue;
+    const importedNames = redisImportMatch[1].split(",").map((s) => s.trim().split(/\s+as\s+/)[0]).filter(Boolean);
+    for (const forbidden of FORBIDDEN_REDIS_WRITE_FUNCTIONS) {
+      assert.ok(
+        !importedNames.includes(forbidden),
+        `${file} imports "${forbidden}" from lib/redis.js -- a real money-path/production-status write, never allowed in the prototype`,
+      );
+    }
+  }
+});
+
+test("jobs/proto-research-scan.js redirects reviewCandidateForAgent's news cache to proto:* (never real pm:news:*)", () => {
+  // Source-level pin, cheap regression guard for the transitive pm:news:*
+  // write Codex flagged 2026-09-23 -- tests/proto-dry-run-isolation.test.js
+  // proves the redirection mechanism itself works; this proves the actual
+  // job wires it up rather than leaving reviewCandidateForAgent to fall back
+  // to the real cache by omission.
+  const source = readFileSync("jobs/proto-research-scan.js", "utf8");
+  assert.match(source, /newsCacheGet:\s*protoNewsCacheGet/, "ctx.newsCacheGet is not wired to the proto:* cache");
+  assert.match(source, /newsCacheSet:\s*protoNewsCacheSet/, "ctx.newsCacheSet is not wired to the proto:* cache");
+});
+
+test("no proto-* file imports the real recordAnthropicUsage or createAnthropicMonthlyBudget (both write/read shared production budget state)", () => {
+  // Codex's 2026-09-23 round-3 finding: getAIRecommendation/evaluateProposal
+  // both record to real pm:anthropic-usage:* by default, which the SHARED
+  // production monthly budget reads -- prototype spend could exhaust it and
+  // make the real scheduled scan fail closed. buildAnthropicUsageRecord (the
+  // pure record builder, no Redis) is fine and expected; recordAnthropicUsage
+  // (the real Redis writer) and createAnthropicMonthlyBudget (the real shared
+  // budget reader/writer) are not.
+  const protoFiles = [
+    ...readdirSync("lib").filter((f) => f.startsWith("proto-")).map((f) => `lib/${f}`),
+    ...readdirSync("jobs").filter((f) => f.startsWith("proto-")).map((f) => `jobs/${f}`),
+  ];
+  for (const file of protoFiles) {
+    const source = readFileSync(file, "utf8");
+    assert.doesNotMatch(source, /import\s*\{[^}]*\brecordAnthropicUsage\b[^}]*\}\s*from\s*["'][^"']*anthropic-usage\.js["']/, `${file} imports the real recordAnthropicUsage -- use buildAnthropicUsageRecord + protoListPush(protoKey.usage()) instead`);
+    assert.doesNotMatch(source, /from\s*["'][^"']*anthropic-monthly-budget\.js["']/, `${file} imports createAnthropicMonthlyBudget -- never pass a real monthlyBudget into createResearchRunBudget for the prototype`);
+  }
+});
+
+test("jobs/proto-research-scan.js and jobs/proto-feedback.js wire recordUsage to proto-scoped telemetry, and the scan job never constructs a real monthlyBudget", () => {
+  const scanSource = readFileSync("jobs/proto-research-scan.js", "utf8");
+  assert.match(scanSource, /recordUsage:\s*protoRecordUsage/, "jobs/proto-research-scan.js ctx does not wire recordUsage to protoRecordUsage");
+  assert.doesNotMatch(scanSource, /createResearchRunBudget\(\s*\{\s*monthlyBudget/, "jobs/proto-research-scan.js still passes a monthlyBudget into createResearchRunBudget");
+
+  const feedbackSource = readFileSync("jobs/proto-feedback.js", "utf8");
+  assert.match(feedbackSource, /await\s+protoRecordUsage\(/, "jobs/proto-feedback.js's lesson-generation call does not use protoRecordUsage");
+});
+
+test("jobs/proto-research-scan.js never calls the real resolveCircuitBreaker or resolveSharedSpreadsheetId (both write real pm:* state)", () => {
+  // Codex 2026-09-23 round-4, both P1: resolveCircuitBreaker writes
+  // pm:hwm:portfolio/pm:breaker:state and can send a real Telegram alert;
+  // resolveSharedSpreadsheetId writes pm:shared:spreadsheet-id on a cache
+  // miss and calls ensureTabs (can create/modify Sheets tabs) even on a hit.
+  const source = readFileSync("jobs/proto-research-scan.js", "utf8");
+  // Check the actual usage, not prose -- the file's own comments name both
+  // functions to explain why they're avoided, so a bare word match would be
+  // a false positive on its own explanation.
+  // "computeCircuitBreakerAssessment" does not contain the substring
+  // "resolveCircuitBreaker", so a plain check is unambiguous -- no need for
+  // lookbehind tricks.
+  assert.doesNotMatch(source, /resolveCircuitBreaker\(/, "must not CALL the real, writing resolveCircuitBreaker -- use computeCircuitBreakerAssessment (read-only) instead");
+  assert.doesNotMatch(source, /resolveSharedSpreadsheetId\(/, "must not CALL the real, writing resolveSharedSpreadsheetId -- use the read-only protoReadOnlySpreadsheetId instead");
+  assert.doesNotMatch(source, /import\s*\{[^}]*\bresolveCircuitBreaker\b/, "must not import the real, writing resolveCircuitBreaker");
+  assert.doesNotMatch(source, /import\s*\{[^}]*\bresolveSharedSpreadsheetId\b/, "must not import the real resolveSharedSpreadsheetId");
+  assert.match(source, /computeCircuitBreakerAssessment/, "should use the read-only computeCircuitBreakerAssessment (Codex round-5: cached pm:breaker:state has no freshness guarantee), not a stale cached read");
+  assert.match(source, /getCachedSharedSpreadsheetId/, "protoReadOnlySpreadsheetId should read the real cached ID (read-only), not resolve/create one");
+});
+
+test("jobs/proto-research-scan.js redirects buildAgentReviewContext's macro/treasury caches to proto:*", () => {
+  const source = readFileSync("jobs/proto-research-scan.js", "utf8");
+  assert.match(source, /macroCacheGet:\s*protoMacroCacheGet/, "macroCacheGet is not wired to the proto:* cache");
+  assert.match(source, /macroCacheSet:\s*protoMacroCacheSet/, "macroCacheSet is not wired to the proto:* cache");
+  assert.match(source, /treasuryCacheGet:\s*protoTreasuryCacheGet/, "treasuryCacheGet is not wired to the proto:* cache");
+  assert.match(source, /treasuryCacheSet:\s*protoTreasuryCacheSet/, "treasuryCacheSet is not wired to the proto:* cache");
+});
