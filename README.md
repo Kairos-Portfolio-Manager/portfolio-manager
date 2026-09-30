@@ -2,7 +2,7 @@
 
 An AI research desk for a real brokerage account. Three agents scan the market every trading day, build a thesis on individual names, and queue a proposal — buy, sell, or hold, with sizing, a written rationale, and a kill criterion. A human approves or rejects every proposal before anything reaches the broker. The system can read the account at any time; it can never place an order on its own.
 
-Companion repo: [portfolio-dashboard](https://github.com/samuelhuffard/portfolio-dashboard) — the approval UI and execution worker.
+Companion repo: [portfolio-dashboard](https://github.com/Kairos-Portfolio-Manager/portfolio-dashboard) — the approval UI and execution worker.
 
 ## Why it's built this way
 
