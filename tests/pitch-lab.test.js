@@ -15,6 +15,10 @@ import { generateDemoData } from "../lib/pitch-lab/demo-data.js";
 import { openPitchStore } from "../lib/pitch-lab/store.js";
 import { PITCH_RESPONSE_SCHEMA, buildPitchPrompt, pitchFromModelResponse } from "../lib/pitch-lab/pitch-prompt.js";
 import { renderReportHtml } from "../lib/pitch-lab/render-html.js";
+import { PEER_RANK_VERSION, computePeerRanks, hasCoverageGap } from "../lib/pitch-lab/peer-rank.js";
+import { METRIC_IDS } from "../config/scoring/mandate-v2.js";
+import { buildDataCoverage } from "../lib/pitch-lab/analysis.js";
+import { peerCheck, peersForPitch } from "../lib/pitch-lab-peer-bridge.js";
 
 const close = (a, b, tol = 1e-3) => assert.ok(Math.abs(a - b) < tol, `${a} !~ ${b}`);
 
@@ -264,7 +268,7 @@ test("model reply becomes a pitch; system-supplied features are not model-editab
   const pitch = pitchFromModelResponse(reply, { ticker: "NET", pitchedAt: "2026-09-21T14:00:00Z", features, entryReference: { price: 100, asOf: "2026-09-21T13:00:00Z" } });
   assert.equal(pitch.conviction, 2);
   assert.equal(pitch.features.revGrowth.missing, true);
-  assert.equal(pitch.provenance.promptVersion, "pitch-lab.prompt.v1");
+  assert.equal(pitch.provenance.promptVersion, "pitch-lab.prompt.v2");
   assert.throws(() => pitchFromModelResponse({ ...reply, conviction: 9 }, { ticker: "NET", pitchedAt: "2026-09-21T14:00:00Z", features, entryReference: { price: 100, asOf: "2026-09-21T13:00:00Z" } }), PitchValidationError);
 });
 
@@ -272,6 +276,276 @@ test("preview page embeds the report safely", () => {
   const html = renderReportHtml({ ...analyzePitchLab({ pitches: [], outcomes: [] }), note: "</script><b>x" });
   assert.ok(!html.includes("</script><b>x"));
   assert.match(html, /<title>Pitch Lab Report<\/title>/);
+});
+
+// --- peer ranks ----------------------------------------------------------
+
+const ASOF = "2026-09-21T14:00:00Z";
+
+/** A peer table: `count` Software peers (revGrowth .05…, P/E 10…) retrieved before ASOF. */
+function peerTable({ count = 10, industry = "Software - Infrastructure", sector = "Technology", retrievedAt = "2026-09-21T01:00:00Z", extra = {} } = {}) {
+  const table = {};
+  for (let i = 1; i <= count; i += 1) {
+    table[`P${i}`] = {
+      industry,
+      sector,
+      metrics: { revGrowth: i * 0.05, peerValuation: i * 10, ...(i <= 3 ? { marginTrend: i * 0.01 } : {}) },
+      retrievedAt,
+      ts: retrievedAt,
+    };
+  }
+  return { ...table, ...extra };
+}
+const candidateFeatures = (overrides = {}) => ({
+  revGrowth: { value: 0.45 },
+  peerValuation: { value: 25 },
+  marginTrend: { value: 0.02 },
+  ...overrides,
+});
+
+test("peer ranks are the share of peers beaten, and a lower P/E counts as better", () => {
+  const peers = computePeerRanks({ ticker: "NET", industry: "Software - Infrastructure", sector: "Technology", features: candidateFeatures(), peerMetrics: peerTable(), asOf: ASOF });
+  assert.equal(peers.version, PEER_RANK_VERSION);
+  assert.equal(peers.level, "industry");
+  assert.equal(peers.peerCount, 10);
+  assert.equal(peers.mode, "peer_relative");
+  assert.deepEqual(peers.ranks.revGrowth, { status: "ranked", percentile: 0.85, peerCount: 10 });
+  assert.deepEqual(peers.ranks.peerValuation, { status: "ranked", percentile: 0.8, peerCount: 10 });
+  assert.equal(peers.peerDataAsOf, "2026-09-21T01:00:00.000Z".replace(".000Z", "Z"));
+  assert.deepEqual(Object.keys(peers.ranks), [...METRIC_IDS]);
+});
+
+test("a metric most peers lack is thin_peers with no percentile; a missing own value is missing_value", () => {
+  const peers = computePeerRanks({ ticker: "NET", industry: "Software - Infrastructure", features: candidateFeatures({ epsTrajectory: { value: null } }), peerMetrics: peerTable(), asOf: ASOF });
+  assert.deepEqual(peers.ranks.marginTrend, { status: "thin_peers", percentile: null, peerCount: 3 });
+  assert.equal(peers.ranks.epsTrajectory.status, "missing_value");
+  assert.equal(peers.ranks.revBeat.status, "missing_value"); // never supplied → nothing to rank
+  assert.ok(hasCoverageGap(peers));
+});
+
+test("a small industry widens to its sector, like the main pipeline", () => {
+  const table = {
+    ...peerTable({ count: 3, industry: "Narrow Industry", sector: "Technology" }),
+    ...Object.fromEntries(Object.entries(peerTable({ count: 10, industry: "Other Industry", sector: "Technology" })).map(([k, v]) => [`S${k}`, v])),
+  };
+  const peers = computePeerRanks({ ticker: "NET", industry: "Narrow Industry", sector: "Technology", features: candidateFeatures(), peerMetrics: table, asOf: ASOF });
+  assert.equal(peers.level, "sector");
+  assert.equal(peers.key, "Technology");
+  assert.equal(peers.peerCount, 13);
+});
+
+test("peer data newer than the pitch, or without a full timestamp, is ignored (no look-ahead)", () => {
+  const table = peerTable({ count: 8 });
+  table.LATE = { ...table.P1, retrievedAt: "2026-09-22T01:00:00Z", ts: "2026-09-22T01:00:00Z" };
+  table.LEGACY = { ...table.P2, retrievedAt: undefined, ts: "2026-09-20" }; // date-only
+  const peers = computePeerRanks({ ticker: "NET", industry: "Software - Infrastructure", features: candidateFeatures(), peerMetrics: table, asOf: ASOF });
+  assert.equal(peers.peerCount, 8);
+  assert.equal(peers.excludedPeers, 2);
+  assert.ok(Date.parse(peers.peerDataAsOf) <= Date.parse(ASOF));
+});
+
+test("the company's own row is never one of its peers, and its classification is read from it", () => {
+  const table = peerTable({ count: 9 });
+  table.NET = { industry: "Software - Infrastructure", sector: "Technology", metrics: { revGrowth: 0.45, peerValuation: 25 }, retrievedAt: "2026-09-21T01:00:00Z" };
+  const peers = computePeerRanks({ ticker: "NET", features: candidateFeatures(), peerMetrics: table, asOf: ASOF });
+  assert.equal(peers.industry, "Software - Infrastructure");
+  assert.equal(peers.peerCount, 9);
+});
+
+test("an unreadable peer table, an unclassified company, and an empty cohort are three different statuses", () => {
+  const down = computePeerRanks({ ticker: "NET", features: candidateFeatures(), peerMetrics: {}, asOf: ASOF });
+  assert.equal(down.reason, "peer_data_unavailable");
+  assert.equal(down.ranks.revGrowth.status, "peer_data_unavailable");
+  assert.equal(computePeerRanks({ ticker: "NET", features: candidateFeatures(), peerMetrics: null, asOf: ASOF }).reason, "peer_data_unavailable");
+
+  const unclassified = computePeerRanks({ ticker: "NET", features: candidateFeatures(), peerMetrics: peerTable(), asOf: ASOF });
+  assert.equal(unclassified.reason, "no_classification");
+  assert.equal(unclassified.ranks.revGrowth.status, "no_peers");
+
+  const empty = computePeerRanks({ ticker: "NET", industry: "Nothing Like It", sector: "Elsewhere", features: candidateFeatures(), peerMetrics: peerTable(), asOf: ASOF });
+  assert.equal(empty.reason, "no_peers_in_cohort");
+  assert.equal(empty.ranks.revGrowth.status, "no_peers");
+  assert.throws(() => computePeerRanks({ ticker: "NET", features: {}, peerMetrics: peerTable(), asOf: "nope" }), TypeError);
+});
+
+test("a pitch stores the peers block and fails closed on a malformed one", () => {
+  const peers = computePeerRanks({ ticker: "NET", industry: "Software - Infrastructure", features: candidateFeatures(), peerMetrics: peerTable(), asOf: "2026-09-21T13:00:00Z" });
+  const pitch = buildPitch(validInput({ peers }));
+  assert.equal(pitch.peers.ranks.revGrowth.percentile, 0.85);
+  assert.ok(Object.isFrozen(pitch.peers.ranks.revGrowth));
+  assert.equal(buildPitch(validInput()).peers, null); // recorded without peer data
+
+  const broken = (mutate) => {
+    const copy = JSON.parse(JSON.stringify(peers));
+    mutate(copy);
+    return validInput({ peers: copy });
+  };
+  assert.throws(() => buildPitch(broken((p) => { p.ranks.marginTrend.percentile = 0.5; })), /percentile must be null unless status is ranked/);
+  assert.throws(() => buildPitch(broken((p) => { p.ranks.revGrowth.percentile = 1.5; })), /percentile must be a number in \[0,1\]/);
+  assert.throws(() => buildPitch(broken((p) => { delete p.ranks.thirteenF; })), /peers.ranks.thirteenF is required/);
+  assert.throws(() => buildPitch(broken((p) => { p.ranks.bogus = { status: "ranked", percentile: 0.1, peerCount: 9 }; })), /unknown metric/);
+  assert.throws(() => buildPitch(broken((p) => { p.ranks.revGrowth.status = "great"; })), /status must be one of/);
+  assert.throws(() => buildPitch(broken((p) => { p.peerDataAsOf = "2026-09-22T00:00:00Z"; })), /look-ahead/);
+  assert.throws(() => buildPitch(broken((p) => { p.version = "other"; })), /peers.version/);
+  assert.notEqual(buildPitch(validInput({ peers })).id, buildPitch(validInput()).id);
+});
+
+test("missing values carry a reason code, and only missing values may", () => {
+  const f = buildFeatures({ fundamentals: null, companyfacts: null, bars: [], asOf: ASOF });
+  assert.equal(f.revBeat.missingReason, "not_supplied_to_pitch_lab");
+  assert.equal(f.revGrowth.missingReason, "no_fundamentals_supplied");
+  assert.equal(f.rsi14.missingReason, "insufficient_price_history");
+  assert.equal(f.logMarketCap.missingReason, "no_market_cap");
+  const yahooOnly = buildFeatures({ fundamentals: { raw: { financialData: {}, summaryDetail: {} } }, bars: [], asOf: ASOF });
+  assert.equal(yahooOnly.peerValuation.missingReason, "no_pe_ratio");
+  assert.equal(yahooOnly.epsTrajectory.missingReason, "no_edgar_facts");
+
+  const pitch = buildPitch(validInput({ features: { ...f, revGrowth: { value: 0.3, asOf: "2026-09-20T00:00:00Z" } } }));
+  assert.equal(pitch.features.revBeat.missingReason, "not_supplied_to_pitch_lab");
+  assert.equal(pitch.features.revGrowth.missingReason, undefined);
+  assert.throws(() => buildPitch(validInput({ features: { revBeat: { value: null, missingReason: "because" } } })), /not recognised/);
+  assert.throws(() => buildPitch(validInput({ features: { revGrowth: { value: 0.3, missingReason: "not_reported" } } })), /only valid when the value is missing/);
+});
+
+test("the prompt shows peer ranks and says when there is none, so the model cannot invent peer claims", () => {
+  const features = candidateFeatures();
+  const peers = computePeerRanks({ ticker: "NET", industry: "Software - Infrastructure", features, peerMetrics: peerTable(), asOf: ASOF });
+  const prompt = buildPitchPrompt({ ticker: "NET", features, peers, entryReference: { price: 100, asOf: ASOF } });
+  assert.match(prompt, /revGrowth .*industry-peer rank: 85th percentile of 10 peers/);
+  assert.match(prompt, /marginTrend .*industry-peer rank: unavailable \(thin_peers\)/);
+  assert.match(prompt, /Only describe a metric as above or below its industry peers when an industry-peer/);
+  assert.ok(!/industry-peer rank/.test(buildPitchPrompt({ ticker: "NET", features, entryReference: { price: 100, asOf: ASOF } }).split("Rate your conviction")[0].split("Data available")[1].split("\n").slice(3).join("\n")));
+});
+
+test("analysis recovers planted peer-rank effects and reports coverage", () => {
+  const { pitches, outcomes } = generateDemoData({ horizons: [5] });
+  const report = analyzePitchLab({ pitches, outcomes, horizons: [5], periods: [{ id: "all", label: "All", from: null, to: null }], options: { bootstrapIterations: 300 } });
+  const h = report.periods[0].horizons[0];
+  const byId = Object.fromEntries(h.peerMetrics.map((m) => [m.id, m]));
+  assert.equal(byId.revGrowth.verdict.label, "positive");
+  assert.equal(byId.peerValuation.verdict.label, "positive"); // cheaper than peers → better
+  assert.match(byId.revGrowth.label, /rank vs industry peers/);
+  const noisy = h.peerMetrics.filter((m) => !["revGrowth", "peerValuation"].includes(m.id) && ["positive", "negative"].includes(m.verdict.label));
+  assert.ok(noisy.length <= 1, `too many false discoveries: ${noisy.map((m) => m.id)}`);
+  assert.equal(report.dataCoverage.pitches, pitches.length);
+  assert.equal(report.dataCoverage.pitchesWithPeerData, pitches.length);
+  assert.ok(report.dataCoverage.peerRankStatus.revGrowth.ranked > 0);
+  assert.doesNotThrow(() => JSON.parse(JSON.stringify(report)));
+});
+
+test("pitches recorded before peer ranks existed count as not_recorded, never as ranked", () => {
+  const { pitches } = generateDemoData({ pitchCount: 6, horizons: [5] });
+  const legacy = buildPitch(validInput());
+  const coverage = buildDataCoverage([...pitches, legacy]);
+  assert.equal(coverage.pitches, 7);
+  assert.equal(coverage.pitchesWithPeerData, 6);
+  assert.equal(coverage.peerRankStatus.revGrowth.not_recorded, 1);
+  assert.equal(coverage.missingReasons.revBeat.missing.unrecorded, 1 + pitches.filter((p) => p.features.revBeat.missing && !p.features.revBeat.missingReason).length);
+});
+
+test("the preview page renders the peer sections", () => {
+  const { pitches, outcomes } = generateDemoData({ pitchCount: 60, horizons: [5] });
+  const html = renderReportHtml(analyzePitchLab({ pitches, outcomes, horizons: [5], options: { bootstrapIterations: 50 } }));
+  assert.match(html, /id="peermetrics"/);
+  assert.match(html, /Peer coverage/);
+  const script = html.match(/<script>([\s\S]*)<\/script>/)[1];
+  assert.doesNotThrow(() => new Function(script));
+});
+
+// --- peer bridge ---------------------------------------------------------
+
+const quietConsole = async (fn) => {
+  const original = console.error;
+  const logged = [];
+  console.error = (...args) => logged.push(args.join(" "));
+  try {
+    return { result: await fn(), logged };
+  } finally {
+    console.error = original;
+  }
+};
+
+test("the bridge files a coverage request only for a real gap, and only when enabled", async () => {
+  const filed = [];
+  const requestCoverage = async (request) => { filed.push(request); return { ...request }; };
+  const base = { ticker: "NET", asOf: ASOF, industry: "Software - Infrastructure", sector: "Technology", getMetrics: async () => peerTable(), requestCoverage };
+
+  const gap = await peersForPitch({ ...base, features: candidateFeatures(), requestsEnabled: true });
+  assert.equal(gap.request.filed, true);
+  assert.deepEqual(filed, [{ ticker: "NET", industry: "Software - Infrastructure", sector: "Technology", source: "pitch-lab" }]);
+
+  filed.length = 0;
+  const off = await peersForPitch({ ...base, features: candidateFeatures(), requestsEnabled: false });
+  assert.deepEqual(off.request, { filed: false, reason: "requests_disabled" });
+
+  const full = await peersForPitch({ ...base, features: { revGrowth: { value: 0.45 }, peerValuation: { value: 25 } }, requestsEnabled: true });
+  assert.deepEqual(full.request, { filed: false, reason: null });
+  assert.equal(filed.length, 0);
+
+  const unclassified = await peersForPitch({ ...base, industry: null, sector: null, features: candidateFeatures(), requestsEnabled: true });
+  assert.deepEqual(unclassified.request, { filed: false, reason: "no_classification" });
+  assert.equal(filed.length, 0);
+});
+
+test("a peer-table outage is recorded as an outage and does not queue requests", async () => {
+  const filed = [];
+  const { result, logged } = await quietConsole(() => peersForPitch({
+    ticker: "NET", asOf: ASOF, industry: "Software - Infrastructure", features: candidateFeatures(), requestsEnabled: true,
+    getMetrics: async () => { throw new Error("redis down"); },
+    requestCoverage: async (request) => { filed.push(request); return request; },
+  }));
+  assert.equal(result.peers.reason, "peer_data_unavailable");
+  assert.equal(result.peers.ranks.revGrowth.status, "peer_data_unavailable");
+  assert.deepEqual(result.request, { filed: false, reason: "peer_data_unavailable" });
+  assert.equal(filed.length, 0);
+  assert.ok(logged.some((line) => line.includes("redis down")), "failure must be loud");
+});
+
+test("a failed coverage request is loud and reported, and still returns the ranks", async () => {
+  const { result, logged } = await quietConsole(() => peersForPitch({
+    ticker: "NET", asOf: ASOF, industry: "Software - Infrastructure", features: candidateFeatures(), requestsEnabled: true,
+    getMetrics: async () => peerTable(),
+    requestCoverage: async () => { throw new Error("write refused"); },
+  }));
+  assert.deepEqual(result.request, { filed: false, reason: "request_failed" });
+  assert.equal(result.peers.ranks.revGrowth.status, "ranked");
+  assert.ok(logged.some((line) => line.includes("write refused")));
+  const notStored = await peersForPitch({ ticker: "NET", asOf: ASOF, industry: "Software - Infrastructure", features: candidateFeatures(), requestsEnabled: true, getMetrics: async () => peerTable(), requestCoverage: async () => null });
+  assert.deepEqual(notStored.request, { filed: false, reason: "request_not_stored" });
+});
+
+test("the dry run fetches like the scan, ranks, and files nothing by default", async () => {
+  const bars = Array.from({ length: 260 }, (_, i) => ({ close: 100 + i * 0.1, volume: 1000 }));
+  const filed = [];
+  const result = await peerCheck({
+    ticker: "net",
+    now: () => new Date(ASOF),
+    getFundamentals: async (t) => ({ ticker: t, industry: "Software - Infrastructure", sector: "Technology", marketCap: 3e10, raw: { financialData: { revenueGrowth: 0.45 }, summaryDetail: { forwardPE: 25 } } }),
+    getCompanyFacts: async () => null,
+    getBars: async () => bars,
+    getMetrics: async () => peerTable(),
+    requestCoverage: async (r) => { filed.push(r); return r; },
+  });
+  assert.equal(result.ticker, "NET");
+  assert.equal(result.peers.ranks.revGrowth.percentile, 0.85);
+  assert.equal(result.features.logMarketCap.value > 10, true);
+  assert.equal(result.features.epsTrajectory.missingReason, "no_edgar_facts");
+  assert.deepEqual(result.request, { filed: false, reason: null }); // every metric it has was ranked, so nothing to request
+  assert.equal(filed.length, 0);
+  await assert.rejects(() => peerCheck({ ticker: "NET", getFundamentals: async () => ({ error: "boom" }), getCompanyFacts: async () => null, getBars: async () => [], getMetrics: async () => ({}) }), /fundamentals unavailable/);
+});
+
+test("only the bridge touches the database; Pitch Lab and its CLI never import it", async () => {
+  const { readdirSync, readFileSync } = await import("node:fs");
+  const libDir = new URL("../lib/pitch-lab/", import.meta.url);
+  const files = [
+    ...readdirSync(libDir).filter((f) => f.endsWith(".js")).map((f) => new URL(f, libDir)),
+    new URL("../scripts/pitch-lab.js", import.meta.url),
+  ];
+  for (const file of files) assert.ok(!/from\s+["'][^"']*pitch-lab-peer-bridge/.test(readFileSync(file, "utf8")), `${file.pathname} must not import the bridge`);
+  const bridge = readFileSync(new URL("../lib/pitch-lab-peer-bridge.js", import.meta.url), "utf8");
+  const redisNames = [...bridge.matchAll(/\b(getPeerMetrics|requestPeerCoverage|set[A-Z]\w*|append\w*|delete\w*)\b/g)].map((m) => m[1]);
+  assert.deepEqual([...new Set(redisNames)].sort(), ["getPeerMetrics", "requestPeerCoverage"], "the bridge may only read the peer table and file coverage requests");
 });
 
 test("pitch lab never imports production write paths", async () => {

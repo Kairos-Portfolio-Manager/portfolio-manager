@@ -2,7 +2,8 @@
 
 **Status:** built, runnable locally, **not deployed and not scheduled.** Paper only.
 Nothing in `lib/pitch-lab/` or `scripts/pitch-lab.js` creates a proposal, calls a
-broker, or writes Redis/Sheets/Postgres. Plan context:
+broker, or writes Redis/Sheets/Postgres. The one place that touches the peer
+table is the separate, narrow bridge (see "Peer-relative metrics"). Plan context:
 `docs/roadmaps/AGENT-ONE-PITCH-LAB-PLAN.md` (sections 3–5 are what this implements).
 
 ## The question it answers
@@ -31,8 +32,11 @@ Agent One (or a human) ──► pitch record ──► pitches.jsonl      (appe
 | Analysis | `lib/pitch-lab/analysis.js` | Per time period × holding period: conviction and per-metric correlation factors with uncertainty. |
 | Statistics | `lib/pitch-lab/stats.js` | Spearman, clustered regression, cluster bootstrap, t-distribution, Benjamini–Hochberg. Pure, no dependencies. |
 | Storage | `lib/pitch-lab/store.js` | Append-only JSON-lines files in `data/pitch-lab/` (git-ignored). No update/delete; duplicates refused. |
+| Peer ranks | `lib/pitch-lab/peer-rank.js` | Pure. Ranks each of the 9 mandate metrics against the company's industry peers (see below). |
+| Peer bridge | `lib/pitch-lab-peer-bridge.js` | The **only** module that touches the database: reads `pm:peer-metrics`, and (flag-gated) files peer-coverage requests. Not imported by anything in `lib/pitch-lab/`. |
 | Preview | `lib/pitch-lab/render-html.js` | Self-contained HTML view of a report. |
-| CLI | `scripts/pitch-lab.js` | `demo`, `record`, `grade`, `analyze`. |
+| CLI | `scripts/pitch-lab.js` | `demo`, `record`, `grade`, `analyze`, `coverage`. |
+| Peer dry run | `scripts/pitch-lab-peer-check.js` | One-ticker check of peer coverage against the real peer table (run on the Jetson). Records nothing. |
 
 ## Running it
 
@@ -41,12 +45,82 @@ npm run pitch-lab -- demo                 # synthetic data, no network, no keys 
 npm run pitch-lab -- record my-pitch.json # one pitch object or an array (see docs/examples/pitch-lab-example-pitch.json)
 npm run pitch-lab -- grade                # needs Yahoo access; grades every pitch whose horizon has passed
 npm run pitch-lab -- analyze              # writes data/pitch-lab/report.json + report.html
+npm run pitch-lab -- coverage             # fill rates: how often each metric was peer-ranked, and why not
+node scripts/pitch-lab-peer-check.js NET  # dry run: fetch like the scan, rank against the live peer table (Jetson)
 ```
 
 Options: `--dir=` (or `PITCH_LAB_DIR`), `--horizons=5,10,20`, `--benchmark=SPY`,
 `--cost=0.001` (per side). The demo plants known effects (conviction +, revenue
 growth +, forward P/E −, everything else noise) and the analysis recovers them —
 that is also a test (`tests/pitch-lab.test.js`).
+
+## Peer-relative metrics
+
+A raw number ("revenue growth 27%") says nothing about whether that is strong *for
+its industry*. Every pitch therefore also records, for each of the nine mandate
+metrics, where the company sits among its industry peers at pitch time.
+
+- **Same maths as the main pipeline.** The peer set comes from `resolvePeerSet`
+  (industry first, widening to sector when the industry has fewer than 8 data-complete
+  peers) and the rank from `percentileRank`, using Agent One's own metric directions
+  (`config/scoring/mandate-v2.js` — a *lower* forward P/E is better). No second
+  implementation.
+- **Percentile = share of peers the company beats**, 0–1, direction-adjusted, so 0.9
+  always means "better than 90% of peers".
+- **A rank is only recorded when at least 8 peers have a value for that metric.**
+  Otherwise the status says why and the percentile is null. Statuses:
+  `ranked`, `thin_peers`, `no_peers`, `missing_value` (the company's own value is
+  missing), `peer_data_unavailable` (the peer table could not be read — an outage is
+  never confused with "no peers"). Nothing is filled in or guessed.
+- **No look-ahead.** Peer rows stamped after the pitch time, and legacy rows without a
+  full-instant retrieval timestamp, are ignored (counted in `excludedPeers`).
+  `peerDataAsOf` records the newest peer row used, and validation rejects one after
+  the pitch.
+- **Only the nine mandate fundamentals are ranked.** Peer rows carry no price or
+  market-cap fields, so those five features stay raw-only.
+- **The model sees the ranks.** The prompt (`pitch-lab.prompt.v2`) shows each rank (or
+  "unavailable") and forbids describing a metric as above or below peers unless one is
+  listed.
+- **The analysis tests ranks as their own family** (`peerMetrics` per horizon, with its
+  own Benjamini–Hochberg correction), next to the raw metrics. Old pitches without a
+  `peers` block simply count as missing there.
+- **Why a raw value is missing is recorded** (`missingReason` on each feature):
+  `not_supplied_to_pitch_lab` (consensus / 13F metrics — `revBeat`, `estimateRevisions`,
+  `instOwnershipDir`, `thirteenF` — which the main scan has but Pitch Lab is not yet
+  handed), `no_fundamentals_supplied`, `no_edgar_facts`, `not_reported`, `no_pe_ratio`,
+  `insufficient_price_history`, `no_market_cap`.
+- **`dataCoverage` in the report** (and `npm run pitch-lab -- coverage`) shows, per
+  metric, how many pitches were ranked / thin / unranked / unrecorded and the missing
+  reasons — the real peer coverage, once pitches come from live data.
+
+### The bridge (the only database contact)
+
+Pitch Lab stays database-free (a test fails if it imports Redis, Sheets, Postgres or a
+broker). `lib/pitch-lab-peer-bridge.js` is the one seam, and a test pins what it may use:
+
+- **Read:** `getPeerMetrics()` — the peer table the nightly peer jobs maintain.
+- **Write:** `requestPeerCoverage()` — the existing bounded, ticker-keyed request queue
+  that the 5:30 PM `peer-coverage-refresh` job consumes. Filed **only** when
+  `PITCH_LAB_PEER_REQUESTS=1` (default off), only when a metric came back
+  `thin_peers`/`no_peers`, never during a peer-table outage, and never for a company
+  with no industry or sector. It never writes peer metrics, proposals, ledgers or
+  anything else, and never calls a model or an order path. The coverage then arrives
+  on the next refresh, so a pitch ranked before that shows the gap honestly instead of
+  waiting.
+
+Nothing imports the bridge from `lib/pitch-lab/` and nothing schedules it. Callers pass
+its `peers` result to `buildPitch` / `pitchFromModelResponse`.
+
+### Not covered (still open)
+
+- **Grading is still against SPY only.** A pitch that beat SPY because its whole sector
+  rallied still counts as a win. Sector-relative grading needs sector return data and is
+  a separate step.
+- **Consensus and 13F metrics are still null in Pitch Lab** (`not_supplied_to_pitch_lab`).
+  Handing them in from the snapshot store / `lib/thirteen-f.js` is a separate step.
+- **Real coverage is unknown from here.** It depends on `PEER_METRICS_ENABLED` /
+  `PEER_METRICS_EDGAR` being on at the Jetson and on the cohorts having filled. Run the
+  dry run there and read `coverage`.
 
 ## Statistical method (and why)
 
@@ -76,7 +150,7 @@ graded pitches spread over months to show up. The per-month view will say
 
 ## Report contract (what the website reads)
 
-`report.json`, `schemaVersion: "pitch-lab.report.v1"`:
+`report.json`, `schemaVersion: "pitch-lab.report.v2"` (v2 adds `peerMetrics` per horizon and `dataCoverage`; pitch records are `pitch-lab.pitch.v2`):
 
 ```
 { schemaVersion, gradingVersion, generatedAt, dataSources[], isSyntheticDemo,
@@ -91,8 +165,12 @@ graded pitches spread over months to show up. The per-month view will say
       metrics: [ { id, label, group, coverage: { present, missing }, clusters, spearman: { rho, ci95 },
                    excessReturnPerSd: { estimate, se, ci95, pValue, qValue },
                    missingVsPresent: { meanExcessPresent, meanExcessMissing, difference },
-                   verdict: { label, summary } } ]   // sorted by |rho|
-    } ] } ] }
+                   verdict: { label, summary } } ],   // sorted by |rho|
+      peerMetrics: [ ...same shape, one per mandate metric, tested on its industry-peer percentile; group: "peer_rank" ]
+    } ] } ],
+  dataCoverage: { pitches, pitchesWithPeerData, peerSetLevel, peerSetMode, peerSetReason,
+    peerRankStatus: { [metricId]: { ranked, thin_peers, no_peers, missing_value, peer_data_unavailable, not_recorded, rankedShare } },
+    missingReasons: { [featureId]: { present, missing: { [reason]: n } } } } }
 ```
 
 Returns are decimals (0.012 = 1.2%). A website must show the `isSyntheticDemo`

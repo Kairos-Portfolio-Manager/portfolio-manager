@@ -7,13 +7,15 @@
  *   npm run pitch-lab -- record <file.json>   validate + append pitch(es) from a JSON file
  *   npm run pitch-lab -- grade                fetch prices, grade every pitch that has matured
  *   npm run pitch-lab -- analyze              build report.json + report.html from stored data
+ *   npm run pitch-lab -- coverage             fill rates: how often each metric was peer-ranked, and why not
+ *   node scripts/pitch-lab-peer-check.js NET  dry run of the peer ranking for one ticker (needs Redis env)
  *
  * Options: --dir=<path> (default $PITCH_LAB_DIR or ./data/pitch-lab)
  *          --horizons=5,10,20  --benchmark=SPY  --cost=0.001
  */
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { analyzePitchLab } from "../lib/pitch-lab/analysis.js";
+import { analyzePitchLab, buildDataCoverage } from "../lib/pitch-lab/analysis.js";
 import { generateDemoData } from "../lib/pitch-lab/demo-data.js";
 import { DEFAULT_BENCHMARK, DEFAULT_COST_PER_SIDE, DEFAULT_HORIZONS, gradePitch } from "../lib/pitch-lab/grading.js";
 import { PitchValidationError } from "../lib/pitch-lab/pitch.js";
@@ -59,6 +61,9 @@ function printSummary(report) {
     console.log(`    conviction: rho=${c.spearman.rho ?? "—"} ${c.spearman.ci95 ? `[${c.spearman.ci95.join(", ")}]` : ""}, per point=${c.excessReturnPerPoint.estimate ?? "—"}, p=${c.excessReturnPerPoint.pValue ?? "—"} → ${c.verdict.label}`);
     for (const m of h.metrics.filter((m) => m.verdict.label === "positive" || m.verdict.label === "negative")) {
       console.log(`    ${m.id}: rho=${m.spearman.rho}, per SD=${m.excessReturnPerSd.estimate}, q=${m.excessReturnPerSd.qValue} → ${m.verdict.label}`);
+    }
+    for (const m of h.peerMetrics.filter((m) => m.verdict.label === "positive" || m.verdict.label === "negative")) {
+      console.log(`    ${m.id} (rank vs industry peers): rho=${m.spearman.rho}, per SD=${m.excessReturnPerSd.estimate}, q=${m.excessReturnPerSd.qValue} → ${m.verdict.label}`);
     }
   }
 }
@@ -136,6 +141,21 @@ switch (command) {
     const paths = writeReport(report, path.resolve(flag("out", dir)));
     printSummary(report);
     console.log(`\nWrote ${paths.jsonPath}\n      ${paths.htmlPath}`);
+    break;
+  }
+  case "coverage": {
+    const coverage = buildDataCoverage(openPitchStore(dir).listPitches());
+    console.log(`\nPitch Lab data coverage — ${coverage.pitches} pitches, ${coverage.pitchesWithPeerData} with peer data`);
+    console.log(`  peer set level: ${JSON.stringify(coverage.peerSetLevel)}   mode: ${JSON.stringify(coverage.peerSetMode)}   reasons: ${JSON.stringify(coverage.peerSetReason)}`);
+    console.log("\n  metric              ranked   thin  none  noval  unavail  not-recorded  ranked share");
+    for (const [id, c] of Object.entries(coverage.peerRankStatus)) {
+      const share = c.rankedShare == null ? "—" : `${(c.rankedShare * 100).toFixed(0)}%`;
+      console.log(`  ${id.padEnd(18)} ${String(c.ranked).padStart(6)} ${String(c.thin_peers).padStart(6)} ${String(c.no_peers).padStart(5)} ${String(c.missing_value).padStart(6)} ${String(c.peer_data_unavailable).padStart(8)} ${String(c.not_recorded).padStart(13)}  ${share.padStart(8)}`);
+    }
+    console.log("\n  why raw values are missing (count by reason):");
+    for (const [id, c] of Object.entries(coverage.missingReasons)) {
+      if (Object.keys(c.missing).length) console.log(`  ${id.padEnd(18)} present=${c.present}  ${JSON.stringify(c.missing)}`);
+    }
     break;
   }
   default:
