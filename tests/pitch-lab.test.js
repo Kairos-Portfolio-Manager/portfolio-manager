@@ -268,7 +268,7 @@ test("model reply becomes a pitch; system-supplied features are not model-editab
   const pitch = pitchFromModelResponse(reply, { ticker: "NET", pitchedAt: "2026-09-21T14:00:00Z", features, entryReference: { price: 100, asOf: "2026-09-21T13:00:00Z" } });
   assert.equal(pitch.conviction, 2);
   assert.equal(pitch.features.revGrowth.missing, true);
-  assert.equal(pitch.provenance.promptVersion, "pitch-lab.prompt.v2");
+  assert.equal(pitch.provenance.promptVersion, "pitch-lab.prompt.v3");
   assert.throws(() => pitchFromModelResponse({ ...reply, conviction: 9 }, { ticker: "NET", pitchedAt: "2026-09-21T14:00:00Z", features, entryReference: { price: 100, asOf: "2026-09-21T13:00:00Z" } }), PitchValidationError);
 });
 
@@ -515,7 +515,7 @@ test("a failed coverage request is loud and reported, and still returns the rank
 });
 
 test("the dry run fetches like the scan, ranks, and files nothing by default", async () => {
-  const bars = Array.from({ length: 260 }, (_, i) => ({ close: 100 + i * 0.1, volume: 1000 }));
+  const bars = Array.from({ length: 260 }, (_, i) => ({ date: new Date(Date.parse("2026-09-18T13:30:00Z") - (259 - i) * 86_400_000), close: 100 + i * 0.1, high: 101 + i * 0.1, low: 99 + i * 0.1, volume: 1000 }));
   const filed = [];
   const result = await peerCheck({
     ticker: "net",
@@ -546,6 +546,8 @@ test("only the bridge touches the database; Pitch Lab and its CLI never import i
   const bridge = readFileSync(new URL("../lib/pitch-lab-peer-bridge.js", import.meta.url), "utf8");
   const redisNames = [...bridge.matchAll(/\b(getPeerMetrics|requestPeerCoverage|set[A-Z]\w*|append\w*|delete\w*)\b/g)].map((m) => m[1]);
   assert.deepEqual([...new Set(redisNames)].sort(), ["getPeerMetrics", "requestPeerCoverage"], "the bridge may only read the peer table and file coverage requests");
+  assert.equal((bridge.match(/\.set\(/g) ?? []).length, 1, "besides the request queue, the bridge may write exactly one namespaced report key");
+  assert.match(bridge, /client\.set\(PITCH_LAB_REPORT_KEY,/);
 });
 
 test("pitch lab never imports production write paths", async () => {

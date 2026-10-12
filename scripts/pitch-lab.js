@@ -17,7 +17,8 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { analyzePitchLab, buildDataCoverage } from "../lib/pitch-lab/analysis.js";
 import { generateDemoData } from "../lib/pitch-lab/demo-data.js";
-import { DEFAULT_BENCHMARK, DEFAULT_COST_PER_SIDE, DEFAULT_HORIZONS, gradePitch } from "../lib/pitch-lab/grading.js";
+import { DEFAULT_BENCHMARK, DEFAULT_COST_PER_SIDE, DEFAULT_HORIZONS } from "../lib/pitch-lab/grading.js";
+import { gradeMaturedPitches } from "../lib/pitch-lab/grade-runner.js";
 import { PitchValidationError } from "../lib/pitch-lab/pitch.js";
 import { renderReportHtml } from "../lib/pitch-lab/render-html.js";
 import { defaultPitchLabDir, openPitchStore } from "../lib/pitch-lab/store.js";
@@ -70,36 +71,11 @@ function printSummary(report) {
 
 async function grade(store) {
   const { fetchDailyBars } = await import("../lib/yahoo.js");
-  const pitches = store.listPitches();
-  const done = new Set(store.listOutcomes().map((o) => `${o.pitchId}:${o.horizonDays}`));
-  const pending = pitches.filter((p) => horizons.some((h) => !done.has(`${p.id}:${h}`)));
-  if (!pending.length) return console.log("[pitch-lab] nothing to grade");
-
-  const earliest = new Date(Math.min(...pending.map((p) => Date.parse(p.pitchedAt))) - 7 * 86_400_000);
-  const benchmarkBars = await fetchDailyBars(benchmark, { period1: earliest });
-  if (!benchmarkBars.length) fail(`no ${benchmark} bars returned — cannot grade anything (check network / ticker)`);
-
-  const barsByTicker = new Map();
-  let stored = 0;
-  let failedTickers = 0;
-  for (const pitch of pending) {
-    if (!barsByTicker.has(pitch.ticker)) {
-      const bars = await fetchDailyBars(pitch.ticker, { period1: earliest });
-      if (!bars.length) {
-        console.error(`[pitch-lab] no price data for ${pitch.ticker}; its pitches stay ungraded`);
-        failedTickers += 1;
-      }
-      barsByTicker.set(pitch.ticker, bars);
-    }
-    const rows = gradePitch({ pitch, bars: barsByTicker.get(pitch.ticker), benchmarkBars, horizons, benchmark, costPerSide });
-    for (const row of rows) {
-      if (row.status !== "matured" || done.has(`${row.pitchId}:${row.horizonDays}`)) continue;
-      store.appendOutcome(row);
-      done.add(`${row.pitchId}:${row.horizonDays}`);
-      stored += 1;
-    }
+  try {
+    await gradeMaturedPitches({ store, fetchBars: fetchDailyBars, horizons, benchmark, costPerSide });
+  } catch (error) {
+    fail(error.message);
   }
-  console.log(`[pitch-lab] graded ${stored} new outcome(s) across ${pending.length} pitch(es)${failedTickers ? `; ${failedTickers} ticker(s) had no data` : ""}`);
 }
 
 switch (command) {
