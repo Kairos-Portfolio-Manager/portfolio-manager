@@ -92,8 +92,8 @@ metrics, where the company sits among its industry peers at pitch time.
   `peers` block simply count as missing there.
 - **Why a raw value is missing is recorded** (`missingReason` on each feature):
   `not_supplied_to_pitch_lab` (consensus / 13F metrics — `revBeat`, `estimateRevisions`,
-  `instOwnershipDir`, `thirteenF` — which the main scan has but Pitch Lab is not yet
-  handed), `no_fundamentals_supplied`, `no_edgar_facts`, `not_reported`, `no_pe_ratio`,
+  `instOwnershipDir`, `thirteenF` — which the main scan has but Pitch Lab is not handed;
+  deliberately deferred, to be revisited later and not a current to-do), `no_fundamentals_supplied`, `no_edgar_facts`, `not_reported`, `no_pe_ratio`,
   `insufficient_price_history`, `no_market_cap`.
 - **`dataCoverage` in the report** (and `npm run pitch-lab -- coverage`) shows, per
   metric, how many pitches were ranked / thin / unranked / unrecorded and the missing
@@ -155,12 +155,12 @@ model, records nothing); drop `--dry-run` to pitch, or use `grade` / `report`.
 - **Entry timing, horizons, benchmark (plan D-1) are still placeholders** (next-close entry, 5/10/20 days, SPY)
   and must be fixed before the first pitch is graded for real.
 - **No "mover" selection slot, no catalyst / macro-regime / fixed-reason-list features, no exit-rule
-  counterfactual, storage is local JSONL (Postgres move pending), and no website endpoint (D-3).**
+  counterfactual. Pitch Lab is not yet connected to the project's database or website: storage is local
+  JSONL and the report is only published to a Redis key. Both the database and the website exist; the
+  connection (and access to them, being arranged) is the open part (D-3).**
 - **Grading is still against SPY only.** A pitch that beat SPY because its whole sector
   rallied still counts as a win. Sector-relative grading needs sector return data and is
   a separate step.
-- **Consensus and 13F metrics are still null in Pitch Lab** (`not_supplied_to_pitch_lab`).
-  Handing them in from the snapshot store / `lib/thirteen-f.js` is a separate step.
 - **Real coverage is unknown from here.** It depends on `PEER_METRICS_ENABLED` /
   `PEER_METRICS_EDGAR` being on at the Jetson and on the cohorts having filled. Run the
   dry run there and read `coverage`.
