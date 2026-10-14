@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createCipheriv, randomBytes } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -84,6 +85,9 @@ test("real migrations + encrypted logical snapshot restore cleanly into disposab
     assert.match(snapshot.tables.proposals.rows[0].created_at, /\+00$/);
     const { envelope, key } = encryptSnapshot(snapshot);
     assert.doesNotMatch(envelope.toString("utf8"), /fixture@example\.invalid|proposal-fixture/);
+    const envelopeMetadata = JSON.parse(envelope.toString("utf8"));
+    assert.equal(envelopeMetadata.format, "portfolio-postgres-encrypted-v2");
+    assert.equal(envelopeMetadata.compression, "gzip");
 
     const decrypted = decryptSnapshot(envelope, key);
     await applyMigrations(target.db, migrationsDir);
@@ -137,6 +141,7 @@ test("real migrations + encrypted logical snapshot restore cleanly into disposab
       allColumnsAndSignatureBytesPreserved: true,
     });
     assert.equal(manifest.rtoSeconds, 1.234);
+    assert.equal(manifest.encryptedBackup, "aes-256-gcm+gzip");
     assert.doesNotMatch(JSON.stringify(manifest), /fixture@example\.invalid|proposal-fixture|FIX/);
   } finally {
     await source.close();
@@ -162,4 +167,32 @@ test("authenticated encryption rejects a tampered backup", async () => {
   bytes[0] ^= 1;
   parsed.ciphertext = bytes.toString("base64");
   assert.throws(() => decryptSnapshot(Buffer.from(JSON.stringify(parsed)), key));
+});
+
+test("compressed envelopes keep repetitive production-shaped evidence bounded", () => {
+  const repeatedEvidence = "evidence-row:".repeat(100_000);
+  const snapshot = {
+    format: "portfolio-postgres-logical-v2",
+    migrations: ["0010_pitch_lab.sql"],
+    tables: { evidence_snapshots: { rows: [{ payload: repeatedEvidence }] } },
+  };
+  const { envelope, key } = encryptSnapshot(snapshot);
+  assert.ok(envelope.length < Buffer.byteLength(JSON.stringify(snapshot)) / 20);
+  assert.deepEqual(decryptSnapshot(envelope, key), snapshot);
+});
+
+test("decrypt remains compatible with legacy uncompressed v1 envelopes", () => {
+  const snapshot = { format: "portfolio-postgres-logical-v2", migrations: [], tables: {} };
+  const key = randomBytes(32);
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  const ciphertext = Buffer.concat([cipher.update(Buffer.from(JSON.stringify(snapshot))), cipher.final()]);
+  const envelope = Buffer.from(JSON.stringify({
+    format: "portfolio-postgres-encrypted-v1",
+    algorithm: "aes-256-gcm",
+    iv: iv.toString("base64"),
+    tag: cipher.getAuthTag().toString("base64"),
+    ciphertext: ciphertext.toString("base64"),
+  }));
+  assert.deepEqual(decryptSnapshot(envelope, key), snapshot);
 });
