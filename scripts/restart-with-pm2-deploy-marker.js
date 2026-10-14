@@ -46,6 +46,11 @@ async function readPendingMarkers(redis, processName, previousRestarts, currentR
   });
 }
 
+export function buildRestartEnv(env, deployedIdentity) {
+  const { PITCH_LAB_ENABLED: _sharedFileGate, ...baseEnv } = env;
+  return { ...baseEnv, ...deployedIdentity };
+}
+
 export async function restartWithPm2DeployMarker({
   processName = process.env.SYSLOOP_PM2_NAME?.trim() || "portfolio-manager",
   target = process.env.SYSLOOP_DEPLOY_TARGET?.trim() || "jetson",
@@ -93,13 +98,12 @@ export async function restartWithPm2DeployMarker({
 
   const branch = await gitValue(["branch", "--show-current"], execFn);
   const commit = await gitValue(["rev-parse", "HEAD"], execFn);
-  const restartEnv = {
-    ...process.env,
+  const restartEnv = buildRestartEnv(process.env, {
     SYSLOOP_DEPLOYED_BRANCH: branch,
     SYSLOOP_DEPLOYED_COMMIT: commit,
     SYSLOOP_DEPLOYED_AT: now.toISOString(),
     SYSLOOP_DEPLOY_TARGET: target,
-  };
+  });
   await execFn("pm2", ["restart", processName, "--update-env", "--time"], {
     timeout: 30_000,
     maxBuffer: 8 * 1024 * 1024,

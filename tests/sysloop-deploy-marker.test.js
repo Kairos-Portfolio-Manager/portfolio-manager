@@ -11,7 +11,7 @@ import {
   signPm2DeployMarker,
   validatePm2DeployMarkerChain,
 } from "../lib/sysloop/deploy-marker.js";
-import { restartWithPm2DeployMarker } from "../scripts/restart-with-pm2-deploy-marker.js";
+import { buildRestartEnv, restartWithPm2DeployMarker } from "../scripts/restart-with-pm2-deploy-marker.js";
 import { persistSnapshot } from "../lib/sysloop/snapshot.js";
 
 const SECRET = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -178,6 +178,21 @@ test("trusted restart helper observes and signs only the restart it performs", a
   assert.equal(deployedEnv.SYSLOOP_DEPLOYED_AT, NOW.toISOString());
   assert.equal(writes[0][0], pm2DeployMarkerKey(PROCESS, 40));
   assert.equal(writes[0][2].nx, true);
+});
+
+test("trusted restart helper leaves the shared Pitch Lab gate out of PM2's saved environment", () => {
+  const restartEnv = buildRestartEnv({
+    PATH: "/usr/bin",
+    PITCH_LAB_ENABLED: "1",
+  }, {
+    SYSLOOP_DEPLOYED_BRANCH: "mandate-v3",
+    SYSLOOP_DEPLOYED_COMMIT: COMMIT_1,
+  });
+  assert.deepEqual(restartEnv, {
+    PATH: "/usr/bin",
+    SYSLOOP_DEPLOYED_BRANCH: "mandate-v3",
+    SYSLOOP_DEPLOYED_COMMIT: COMMIT_1,
+  });
 });
 
 test("restart helper refuses to launder an unexplained gap before invoking PM2 restart", async () => {
