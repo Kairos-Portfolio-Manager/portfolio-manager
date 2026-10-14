@@ -21,6 +21,37 @@ const REPO_ROOT = path.resolve(__dirname, "..");
 const DAILY_PREFIX = "pm:phase0-observation:";
 const INDEX_KEY = "pm:phase0-observation:index";
 const RETENTION_SECONDS = 90 * 24 * 60 * 60;
+
+export function shouldSendPhase0Telegram(record, env = process.env) {
+  if (env.PHASE0_TELEGRAM_MODE?.trim() === "all") return true;
+  // Phase 0 remains a durable internal record. Phones are reserved for a real
+  // trust/safety failure; routine passes and research-sample warnings belong on
+  // the dashboard now that Pitch Lab owns the observation conversation.
+  if (record?.trustVerdict !== "FAIL") return false;
+  const blockingTrust = (record.checks ?? []).filter((row) =>
+    ["TRUST", "BOTH"].includes(row?.domain) && ["fail", "insufficient"].includes(row?.status));
+  const parityOnly = blockingTrust.length > 0
+    && blockingTrust.every((row) => ["transactional_parity", "valuation_status"].includes(row.name));
+  return !parityOnly;
+}
+
+export async function deliverPhase0Telegram(record, {
+  redis,
+  env = process.env,
+  send = sendMessage,
+  now = () => new Date(),
+} = {}) {
+  const deliveryKey = `${DAILY_PREFIX}${record.dateET}:telegram-sent`;
+  if (await redis.get(deliveryKey)) return { status: "already_recorded" };
+  if (!shouldSendPhase0Telegram(record, env)) {
+    await redis.set(deliveryKey, "suppressed:action-only", { ex: RETENTION_SECONDS });
+    return { status: "suppressed", marker: "suppressed:action-only" };
+  }
+  const message = formatPhase0Observation(record);
+  await send(message);
+  await redis.set(deliveryKey, now().toISOString(), { ex: RETENTION_SECONDS });
+  return { status: "sent", message };
+}
 const MAX_DAYS = 90;
 const SENTINEL_MAX_AGE_MS = 30 * 60 * 1000;
 const PERSISTENCE_CUTOFF_MINUTE_ET = 20 * 60 + 20;
@@ -437,14 +468,13 @@ export async function runPhase0Observer(options = {}) {
   const persisted = await persistPhase0Observation(record, { ...options, secret });
   const retained = persisted.record;
   const redis = options.redis ?? getRedis();
-  const deliveryKey = `${DAILY_PREFIX}${retained.dateET}:telegram-sent`;
-  const alreadySent = await redis.get(deliveryKey);
   if (!persisted.created) console.log(`[Phase0] ${record.dateET} already has an immutable observation; existing record retained.`);
-  if (alreadySent) return retained;
-  const message = formatPhase0Observation(retained);
-  console.log(`[Phase0] ${message.replaceAll("\n", " | ")}`);
-  await (options.send ?? sendMessage)(message);
-  await redis.set(deliveryKey, new Date().toISOString(), { ex: RETENTION_SECONDS });
+  const delivery = await deliverPhase0Telegram(retained, { redis, env: options.env, send: options.send, now: () => options.now ?? new Date() });
+  if (delivery.status === "suppressed") {
+    console.log(`[Phase0] ${record.dateET} retained without Telegram (action-only policy).`);
+    return retained;
+  }
+  if (delivery.status === "sent") console.log(`[Phase0] ${delivery.message.replaceAll("\n", " | ")}`);
   return retained;
 }
 

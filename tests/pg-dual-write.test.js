@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { PGlite } from "@electric-sql/pglite";
 import {
   dualWriteEnabled,
   runShadowOperation,
@@ -10,6 +13,10 @@ import {
   shadowWritePosition,
   shadowReplacePositions,
 } from "../lib/pg/dual-write.js";
+import { applyMigrations } from "../lib/pg/restore-drill.js";
+
+const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const migrationsDir = join(root, "db/migrations");
 
 // The safety-critical properties of the shadow layer, testable without a DB:
 // OFF by default, and a shadow write is always a no-op that never throws when
@@ -42,7 +49,34 @@ test("NAV shadow write validates and inserts a complete accounting snapshot", as
   assert.deepEqual(result, { ok: true });
   assert.equal(calls.length, 1);
   assert.match(calls[0][0], /INSERT INTO nav_snapshots/);
+  assert.match(calls[0][0], /pg_advisory_xact_lock/);
+  assert.match(calls[0][0], /ORDER BY id DESC\s+LIMIT 1/);
   assert.deepEqual(calls[0][1], ["2026-07-14", 125.37, 110, 100, 1.2537]);
+});
+
+test("real Postgres NAV writes compare only with the latest same-date row", async () => {
+  const db = new PGlite();
+  try {
+    await applyMigrations(db, migrationsDir);
+    const values = [98.90, 98.78, 98.77, 98.78, 98.77, 98.77];
+    for (const navPerUnit of values) {
+      const result = await shadowWriteNavSnapshot({
+        date: "2026-10-12",
+        totalValue: navPerUnit * 100,
+        cash: 100,
+        unitsOutstanding: 100,
+        navPerUnit,
+      }, { enabled: true, pool: db });
+      assert.equal(result.ok, true);
+    }
+    const rows = (await db.query(
+      "SELECT nav_per_unit::float8 AS nav FROM nav_snapshots WHERE snapshot_date = $1 ORDER BY id",
+      ["2026-10-12"],
+    )).rows;
+    assert.deepEqual(rows.map((row) => row.nav), [98.90, 98.78, 98.77, 98.78, 98.77]);
+  } finally {
+    await db.close();
+  }
 });
 
 test("an enabled shadow failure is reported but never thrown into the authoritative path", async () => {

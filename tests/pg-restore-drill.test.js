@@ -56,6 +56,18 @@ async function seedRepresentativeState(db) {
      VALUES ($1,$2,$3,$4,$5)`,
     ["restore-fixture", "ok", "2026-07-14T16:00:00Z", "2026-07-14T16:00:01Z", { fixture: true }]
   );
+  await db.query(
+    "INSERT INTO pitch_lab_selections (selection_date, record) VALUES ($1, $2)",
+    ["2026-10-12", { date: "2026-10-12", picks: [{ ticker: "FIX" }] }]
+  );
+  await db.query(
+    "INSERT INTO pitch_lab_pitches (id, agent_id, ticker, pitched_at, pitch_date, record) VALUES ($1, $2, $3, $4, $5, $6)",
+    ["pitch-fixture", "agent-1", "FIX", "2026-10-12T22:40:00Z", "2026-10-12", { id: "pitch-fixture", agentId: "agent-1", ticker: "FIX", pitchedAt: "2026-10-12T22:40:00.000Z" }]
+  );
+  await db.query(
+    "INSERT INTO pitch_lab_outcomes (pitch_id, horizon_days, graded_at, record) VALUES ($1, $2, $3, $4)",
+    ["pitch-fixture", 5, "2026-10-20T22:00:00Z", { pitchId: "pitch-fixture", horizonDays: 5, status: "matured", gradedAt: "2026-10-20T22:00:00Z" }]
+  );
 }
 
 test("real migrations + encrypted logical snapshot restore cleanly into disposable Postgres", async () => {
@@ -86,11 +98,11 @@ test("real migrations + encrypted logical snapshot restore cleanly into disposab
     const verification = await verifyRestoredSnapshot(target.db, decrypted);
 
     assert.equal(verification.ok, true);
-    // 21 as of 0009_consensus_snapshots. This count is deliberately explicit:
+    // 24 as of 0010_pitch_lab. This count is deliberately explicit:
     // adding a table to the schema without adding it to the backup inventory
     // must break here rather than silently ship an unbacked-up table.
-    assert.equal(verification.tablesVerified, 21);
-    assert.ok(verification.rowsVerified >= 4);
+    assert.equal(verification.tablesVerified, 24);
+    assert.ok(verification.rowsVerified >= 7);
     assert.deepEqual(decrypted.migrations, migrationFiles);
 
     const restoredCapital = (await target.db.query("SELECT row_hmac FROM capital_entries WHERE entry_id = $1", ["capital-fixture"])).rows[0];
@@ -120,7 +132,7 @@ test("real migrations + encrypted logical snapshot restore cleanly into disposab
     const manifest = privacySafeManifest(snapshot, verification, { totalMs: 1234 }, "fixture");
     assert.deepEqual(manifest.verification, {
       ok: true,
-      tablesVerified: 21,
+      tablesVerified: 24,
       failedTableCount: 0,
       allColumnsAndSignatureBytesPreserved: true,
     });

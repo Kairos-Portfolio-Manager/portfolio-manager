@@ -13,7 +13,15 @@ import { computePeerRanks } from "../lib/pitch-lab/peer-rank.js";
 import { PitchReplyError, buildPitchPrompt, buildPitchSystemPrompt, parsePitchReplyText } from "../lib/pitch-lab/pitch-prompt.js";
 import { buildPitch } from "../lib/pitch-lab/pitch.js";
 import { PITCH_LAB_REPORT_KEY, publishPitchLabReport } from "../lib/pitch-lab-peer-bridge.js";
-import { createModelCaller, loadMandateExcerpt, pitchLabEnabled, runPitchLabDaily } from "../jobs/pitch-lab-daily.js";
+import {
+  createModelCaller,
+  loadMandateExcerpt,
+  pitchLabEnabled,
+  runPitchLabDaily,
+  runPitchLabDailyCycle,
+  runPitchLabGrade,
+  runPitchLabReport,
+} from "../jobs/pitch-lab-daily.js";
 
 const DATE = "2026-10-02";
 const NOW = () => new Date("2026-10-02T22:40:00Z"); // 18:40 ET, after the close
@@ -229,6 +237,20 @@ test("re-running the same day never re-draws and never double-pitches", async ()
   });
 });
 
+test("a database same-day pitch conflict is treated as an idempotent resume", async () => {
+  await withDir(async (store) => {
+    const conflictStore = {
+      ...store,
+      appendPitch: async () => { throw Object.assign(new Error("already recorded"), { code: "pitch_already_recorded" }); },
+    };
+    const { args } = deps(conflictStore, { maxPitches: 1 });
+    const { result } = await quiet(() => runDailyPitches(args));
+    assert.equal(result.status, "ok");
+    assert.equal(result.failed.length, 0);
+    assert.equal(result.skipped.filter((row) => row.reason === "already_pitched_today").length, 1);
+  });
+});
+
 test("a budget stop ends the run loudly, and the next run resumes the SAME picks", async () => {
   await withDir(async (store) => {
     let n = 0;
@@ -279,12 +301,39 @@ test("one bad reply drops that pitch loudly and the rest still land", async () =
   });
 });
 
+test("a billed truncated reply still counts against the run spend tally", async () => {
+  await withDir(async (store) => {
+    const { args } = deps(store, {
+      maxPitches: 1,
+      callModel: async () => {
+        throw Object.assign(new Error("reply hit max_tokens — discarded (fail closed)"), {
+          code: "reply_truncated",
+          costUsd: 0.0375,
+        });
+      },
+    });
+    const { result } = await quiet(() => runDailyPitches(args));
+    assert.equal(result.status, "partial");
+    assert.equal(result.pitched, 0);
+    assert.equal(result.spendUsd, 0.0375);
+    assert.equal(result.failed.length, 1);
+  });
+});
+
 test("the per-run spend cap and pitch cap stop further pitches", async () => {
   await withDir(async (store) => {
-    const capped = deps(store, { callModel: async () => ({ text: goodReply(), costUsd: 0.4 }), maxUsd: 1 });
+    const capped = deps(store, {
+      callModel: async ({ remainingUsd }) => {
+        if (remainingUsd < 0.4) throw Object.assign(new Error("next call would exceed run cap"), { code: "run_budget_exhausted" });
+        return { text: goodReply(), costUsd: 0.4 };
+      },
+      maxUsd: 1,
+    });
     const { result } = await quiet(() => runDailyPitches(capped.args));
-    assert.equal(result.pitched, 3); // 0.4, 0.8, 1.2 → cap reached
-    assert.equal(result.skipped.filter((s) => s.reason === "run_spend_cap_reached").length, 12);
+    assert.equal(result.status, "budget_stop");
+    assert.equal(result.pitched, 2);
+    assert.equal(result.spendUsd, 0.8);
+    assert.equal(result.skipped.filter((s) => s.reason === "budget_stop").length, 12);
   });
   await withDir(async (store) => {
     const limited = deps(store, { maxPitches: 4 });
@@ -393,6 +442,7 @@ test("the job wires the real mandate excerpt, version and model into a run", asy
       callModel: args.callModel,
       notify: args.notify,
       sleep: async () => {},
+      redis: { async set() { return "OK"; } },
     }));
     assert.equal(result.pitched, 2);
     assert.equal(calls.model.length, 2);
@@ -402,6 +452,236 @@ test("the job wires the real mandate excerpt, version and model into a run", asy
   });
   assert.match(loadMandateExcerpt(), /^## 1\. IDENTITY[\s\S]*Agent One/);
   assert.throws(() => loadMandateExcerpt(tmpdir()), /ENOENT/);
+});
+
+test("the daily completion marker stays inside the pitchlab namespace", async () => {
+  await withDir(async (store, dir) => {
+    const { args } = deps(store);
+    const writes = [];
+    const redis = { async set(key, value, options) { writes.push([key, value, options]); return "OK"; } };
+    await quiet(() => runPitchLabDaily({
+      env: { PITCH_LAB_ENABLED: "1", PITCH_LAB_DIR: dir, PITCH_LAB_MAX_PITCHES: "1" },
+      now: NOW,
+      store,
+      redis,
+      monthlyBudget: {},
+      getCatalog: args.getCatalog,
+      gatherData: args.gatherData,
+      getPeers: args.getPeers,
+      callModel: args.callModel,
+      notify: args.notify,
+      sleep: async () => {},
+    }));
+    assert.ok(writes.length > 0);
+    assert.ok(writes.every(([key]) => key.startsWith("pitchlab:")));
+  });
+});
+
+test("the grade digest defers until the daily pitch run has completed", async () => {
+  let sends = 0;
+  const redis = { async get() { return null; } };
+  const result = await runPitchLabGrade({
+    env: { PITCH_LAB_ENABLED: "1" },
+    now: NOW,
+    redis,
+    send: async () => { sends += 1; },
+  });
+  assert.deepEqual(result, { status: "deferred", reason: "daily_incomplete", date: DATE });
+  assert.equal(sends, 0);
+});
+
+test("a delivered daily digest remains successful when its confirmation write fails", async () => {
+  const values = new Map([[`pitchlab:run:daily:${DATE}`, JSON.stringify({ status: "ok", selected: 1, failedCount: 0, shortfall: 0 })]]);
+  let confirmationFails = true;
+  let sends = 0;
+  const redis = {
+    async get(key) { return values.get(key) ?? null; },
+    async set(key, value, options = {}) {
+      if (options.nx && values.has(key)) return null;
+      if (key === `pitchlab:telegram:daily:${DATE}` && value !== "sending" && confirmationFails) {
+        confirmationFails = false;
+        throw new Error("confirmation unavailable");
+      }
+      values.set(key, value);
+      return "OK";
+    },
+    async del(key) { values.delete(key); },
+  };
+  const store = { async listPitches() { return []; }, async listOutcomes() { return []; } };
+  const options = {
+    env: { PITCH_LAB_ENABLED: "1" }, now: NOW, redis, store,
+    grade: async () => ({ pending: 0, stored: 0, failedTickers: [] }),
+    send: async () => { sends += 1; },
+  };
+  const first = await quiet(() => runPitchLabGrade(options));
+  const second = await quiet(() => runPitchLabGrade(options));
+  assert.equal(first.result.status, "ok");
+  assert.equal(second.result.status, "ok");
+  assert.equal(sends, 1);
+});
+
+test("a retry reports outcomes graded before the first Telegram send failed", async () => {
+  const pitch = { ...buildPitch({
+    ticker: "NET",
+    pitchedAt: "2026-10-02T21:00:00.000Z",
+    conviction: 4,
+    intendedHoldingDays: 5,
+    entryReference: { price: 100, asOf: "2026-10-02T20:00:00.000Z" },
+    features: buildFeatures({ bars: [], asOf: "2026-10-02T20:00:00.000Z" }),
+    rationale: { thesis: "Revenue acceleration and improving price action support a short-term setup.", reasons: [{ claim: "Growth improved.", features: [] }], risks: ["Demand could slow."], killCriteria: [] },
+    provenance: { source: "manual" },
+  }) };
+  const outcomes = [];
+  const store = { async listPitches() { return [pitch]; }, async listOutcomes() { return outcomes; } };
+  const values = new Map([[`pitchlab:run:daily:${DATE}`, JSON.stringify({ status: "ok", selected: 1, failedCount: 0, shortfall: 0 })]]);
+  const redis = {
+    async get(key) { return values.get(key) ?? null; },
+    async set(key, value, options = {}) { if (options.nx && values.has(key)) return null; values.set(key, value); return "OK"; },
+    async del(key) { values.delete(key); },
+  };
+  let graded = false;
+  const grade = async () => {
+    if (!graded) {
+      graded = true;
+      outcomes.push({ pitchId: pitch.id, ticker: "NET", horizonDays: 5, status: "matured", excessReturn: 0.02, gradedAt: NOW().toISOString() });
+      return { pending: 1, stored: 1, failedTickers: [] };
+    }
+    return { pending: 0, stored: 0, failedTickers: [] };
+  };
+  await assert.rejects(() => runPitchLabGrade({ env: { PITCH_LAB_ENABLED: "1" }, now: NOW, redis, store, grade, send: async () => { throw new Error("telegram down"); } }), /telegram down/);
+  let message = "";
+  const retry = await runPitchLabGrade({ env: { PITCH_LAB_ENABLED: "1" }, now: NOW, redis, store, grade, send: async (text) => { message = text; } });
+  assert.equal(retry.status, "ok");
+  assert.match(message, /5-day: 1\/1 beat SPY; average \+2\.0%/);
+});
+
+test("a grading failure still sends today's pitch digest", async () => {
+  const store = { async listPitches() { return []; }, async listOutcomes() { return []; } };
+  const values = new Map([[`pitchlab:run:daily:${DATE}`, JSON.stringify({ status: "ok", selected: 1, failedCount: 0, shortfall: 0 })]]);
+  const redis = {
+    async get(key) { return values.get(key) ?? null; },
+    async set(key, value, options = {}) { if (options.nx && values.has(key)) return null; values.set(key, value); return "OK"; },
+    async del(key) { values.delete(key); },
+  };
+  let message = "";
+  const { result } = await quiet(() => runPitchLabGrade({
+    env: { PITCH_LAB_ENABLED: "1" }, now: NOW, redis, store,
+    grade: async () => { throw new Error("duplicate outcome"); },
+    send: async (text) => { message = text; },
+  }));
+  assert.equal(result.status, "partial");
+  assert.match(message, /Grading could not finish today/);
+});
+
+test("the scheduler daily cycle always grades after the pitch run completes", async () => {
+  const order = [];
+  const daily = { status: "ok", date: DATE, selected: 2, pitched: 2, failed: [], shortfall: 0 };
+  const result = await runPitchLabDailyCycle({
+    runDaily: async () => { order.push("daily"); return daily; },
+    runGrade: async (options) => {
+      order.push("grade");
+      assert.deepEqual(options.dailyRun, {
+        status: "ok", date: DATE, selected: 2, pitched: 2, failedCount: 0, shortfall: 0,
+      });
+      return { status: "ok", stored: 1 };
+    },
+  });
+  assert.deepEqual(order, ["daily", "grade"]);
+  assert.equal(result.grade.stored, 1);
+});
+
+test("the scheduled daily digest reports drops from the runner's failed array", async () => {
+  const values = new Map();
+  const redis = {
+    async get(key) { return values.get(key) ?? null; },
+    async set(key, value, options = {}) {
+      if (options.nx && values.has(key)) return null;
+      values.set(key, value);
+      return "OK";
+    },
+    async del(key) { values.delete(key); },
+  };
+  const store = { async listPitches() { return []; }, async listOutcomes() { return []; } };
+  let message = "";
+  const daily = {
+    status: "partial",
+    date: DATE,
+    selected: 15,
+    pitched: 12,
+    failed: [
+      { ticker: "AAA", reason: "malformed_reply" },
+      { ticker: "BBB", reason: "source unavailable" },
+      { ticker: "CCC", reason: "invalid_pitch" },
+    ],
+    shortfall: 0,
+  };
+  const result = await runPitchLabDailyCycle({
+    runDaily: async () => daily,
+    runGrade: (options) => runPitchLabGrade({
+      ...options,
+      env: { PITCH_LAB_ENABLED: "1" },
+      now: NOW,
+      redis,
+      store,
+      grade: async () => ({ pending: 0, stored: 0, failedTickers: [] }),
+      send: async (text) => { message = text; },
+    }),
+  });
+  assert.equal(result.status, "partial");
+  assert.match(message, /3 pitches were dropped/);
+});
+
+test("the daily cycle treats a post-run grading deferral as a job failure", async () => {
+  await assert.rejects(
+    () => runPitchLabDailyCycle({
+      runDaily: async () => ({ status: "ok", pitched: 2 }),
+      runGrade: async () => ({ status: "deferred", reason: "daily_completion_unavailable" }),
+    }),
+    (error) => error.code === "pitch_lab_grade_deferred",
+  );
+});
+
+test("in-memory daily completion bypasses a failed marker read", async () => {
+  let reads = 0;
+  let sends = 0;
+  const redis = {
+    async get() { reads += 1; throw new Error("temporary Redis read failure"); },
+    async set() { return "OK"; },
+    async del() {},
+  };
+  const store = { async listPitches() { return []; }, async listOutcomes() { return []; } };
+  const result = await runPitchLabGrade({
+    env: { PITCH_LAB_ENABLED: "1" },
+    now: NOW,
+    redis,
+    store,
+    dailyRun: { status: "ok", date: DATE, selected: 1, pitched: 1, failedCount: 0, shortfall: 0 },
+    grade: async () => ({ pending: 0, stored: 0, failedTickers: [] }),
+    send: async () => { sends += 1; },
+  });
+  assert.equal(result.status, "ok");
+  assert.equal(reads, 0);
+  assert.equal(sends, 1);
+});
+
+test("the weekly report publishes and sends exactly once through injected runtime dependencies", async () => {
+  await withDir(async (_store, dir) => {
+    const values = new Map();
+    const redis = {
+      async get(key) { return values.get(key) ?? null; },
+      async set(key, value, options = {}) { if (options.nx && values.has(key)) return null; values.set(key, value); return "OK"; },
+      async del(key) { values.delete(key); },
+    };
+    let sends = 0;
+    const store = { async listPitches() { return []; }, async listOutcomes() { return []; } };
+    const options = { env: { PITCH_LAB_ENABLED: "1", PITCH_LAB_DIR: dir }, now: NOW, store, redis, send: async () => { sends += 1; } };
+    const first = await runPitchLabReport(options);
+    const second = await runPitchLabReport(options);
+    assert.equal(first.status, "ok");
+    assert.equal(second.status, "ok");
+    assert.equal(sends, 1);
+    assert.ok(values.has(PITCH_LAB_REPORT_KEY));
+  });
 });
 
 test("the model caller authorises, calls, records usage and settles, and fails closed on a truncated reply", async () => {
@@ -420,12 +700,29 @@ test("the model caller authorises, calls, records usage and settles, and fails c
   assert.equal(order.at(-1), "settle");
 
   const truncated = createModelCaller({ client: { messages: { create: async () => reply("max_tokens") } }, monthlyBudget: budget, model: "claude-sonnet-4-6" });
-  await quiet(() => assert.rejects(() => truncated({ ticker: "AAA", system: "s", prompt: "p" }), /max_tokens/));
+  await quiet(() => assert.rejects(
+    () => truncated({ ticker: "AAA", system: "s", prompt: "p" }),
+    (error) => error.code === "reply_truncated" && error.costUsd > 0,
+  ));
 
   order.length = 0;
   const failing = createModelCaller({ client: { messages: { create: async () => { throw new Error("overloaded"); } } }, monthlyBudget: budget, model: "claude-sonnet-4-6" });
   await assert.rejects(() => failing({ ticker: "AAA", system: "s", prompt: "p" }), /overloaded/);
   assert.deepEqual(order, ["authorize:pitch_lab", "settleFailure"]);
+
+  order.length = 0;
+  let providerCalls = 0;
+  const capped = createModelCaller({
+    client: { messages: { create: async () => { providerCalls += 1; return reply("end_turn"); } } },
+    monthlyBudget: budget,
+    model: "claude-sonnet-4-6",
+  });
+  await assert.rejects(
+    () => capped({ ticker: "AAA", system: "s", prompt: "p", remainingUsd: 0.000001 }),
+    (error) => error.code === "run_budget_exhausted",
+  );
+  assert.equal(providerCalls, 0);
+  assert.deepEqual(order, []);
 });
 
 // --- report publish + isolation -----------------------------------------
@@ -445,12 +742,17 @@ test("the report is published to one fixed namespaced key and nothing else", asy
 
 test("the scheduler process and job reach only what Pitch Lab is allowed to", () => {
   const read = (rel) => readFileSync(new URL(`../${rel}`, import.meta.url), "utf8");
-  const forbidden = /createProposal|robinhood|fill-processing|proposal-signature|research-scan|sheets\.js|lib\/pg\//;
+  const forbidden = /createProposal|robinhood|fill-processing|proposal-signature|research-scan|sheets\.js/;
   for (const file of ["jobs/pitch-lab-daily.js", "pitch-lab-scheduler.js", "lib/pitch-lab-peer-bridge.js"]) {
     assert.ok(!forbidden.test(read(file).replace(/\/\*[\s\S]*?\*\//g, "")), `${file} reaches a production write path`);
   }
-  // The job's only redis import is the read-only universe catalog; the scheduler never touches redis at all.
-  assert.deepEqual([...read("jobs/pitch-lab-daily.js").matchAll(/import \{([^}]*)\} from "\.\.\/lib\/redis\.js"/g)].map((m) => m[1].trim()), ["getUniverseCatalog"]);
+  // Redis is presentation/selection only; canonical records go through the dedicated Postgres store.
+  assert.deepEqual([...read("jobs/pitch-lab-daily.js").matchAll(/import \{([^}]*)\} from "\.\.\/lib\/redis\.js"/g)].map((m) => m[1].trim()), ["getRedis, getUniverseCatalog"]);
+  assert.deepEqual(
+    [...read("jobs/pitch-lab-daily.js").matchAll(/from "\.\.\/lib\/pg\/([^\"]+)"/g)].map((m) => m[1]),
+    ["pitch-lab-store.js"],
+  );
+  assert.match(read("jobs/pitch-lab-daily.js"), /openPostgresPitchStore/);
   assert.ok(!/redis/.test(read("pitch-lab-scheduler.js").replace(/\/\*[\s\S]*?\*\//g, "")));
   // Not registered in the production scheduler.
   assert.ok(!/pitch-lab/i.test(read("scheduler.js")), "scheduler.js must not register Pitch Lab jobs");

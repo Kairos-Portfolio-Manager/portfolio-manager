@@ -12,12 +12,12 @@
  *
  * Schedule (ET; the slots avoid the 18:00-20:20 production jobs' start times):
  *   18:40 Mon-Fri  daily pitches   (after the 17:15 scan and 17:30 peer-coverage refresh)
- *   19:10 Mon-Fri  grade matured pitches
+ *   after daily      grade matured pitches + send the digest (never races daily)
  *   10:00 Sat      weekly report -> report.json/html + published key for the website
  */
 import "dotenv/config";
 import cron from "node-cron";
-import { runPitchLabDaily, runPitchLabGrade, runPitchLabReport, pitchLabEnabled } from "./jobs/pitch-lab-daily.js";
+import { runPitchLabDailyCycle, runPitchLabReport, pitchLabEnabled } from "./jobs/pitch-lab-daily.js";
 import { sendMessage } from "./lib/telegram.js";
 
 const TZ = { timezone: "America/New_York" };
@@ -39,8 +39,7 @@ function guarded(name, job) {
   };
 }
 
-cron.schedule("40 18 * * 1-5", guarded("daily", () => runPitchLabDaily()), TZ);
-cron.schedule("10 19 * * 1-5", guarded("grade", () => runPitchLabGrade()), TZ);
+cron.schedule("40 18 * * 1-5", guarded("daily", () => runPitchLabDailyCycle()), TZ);
 cron.schedule("0 10 * * 6", guarded("report", () => runPitchLabReport()), TZ);
 
 console.log(`[PitchLabScheduler] started — ${pitchLabEnabled() ? "ENABLED" : "idle (PITCH_LAB_ENABLED not set)"}`);

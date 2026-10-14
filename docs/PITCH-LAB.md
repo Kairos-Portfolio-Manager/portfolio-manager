@@ -2,9 +2,10 @@
 
 **Status:** built, runnable locally, **not deployed.** The daily loop exists (see "Daily loop") but is
 off unless `PITCH_LAB_ENABLED=1` and is not part of `scheduler.js`. Paper only.
-Nothing in `lib/pitch-lab/` or `scripts/pitch-lab.js` creates a proposal, calls a
-broker, or writes Redis/Sheets/Postgres. The one place that touches the peer
-table is the separate, narrow bridge (see "Peer-relative metrics"). Plan context:
+Nothing in `lib/pitch-lab/` creates a proposal or calls a broker. Production
+records are canonical, append-only Postgres rows; Redis carries peer/candidate
+inputs plus namespaced completion, Telegram-dedupe, and report projections.
+Plan context:
 `docs/roadmaps/AGENT-ONE-PITCH-LAB-PLAN.md` (sections 3–5 are what this implements).
 
 ## The question it answers
@@ -16,9 +17,9 @@ table is the separate, narrow bridge (see "Peer-relative metrics"). Plan context
 ## How it works
 
 ```
-Agent One (or a human) ──► pitch record ──► pitches.jsonl      (append-only)
+Agent One ──► pitch record ──► Postgres pitch_lab_pitches      (append-only)
                               │
-       market prices ──► grading at 5/10/20 trading days ──► outcomes.jsonl (append-only)
+       market prices ──► grading at 5/10/20 trading days ──► pitch_lab_outcomes (append-only)
                               │
                          analysis ──► report.json  ──► website
                                   └─► report.html  (preview of the website view)
@@ -32,9 +33,9 @@ Agent One (or a human) ──► pitch record ──► pitches.jsonl      (appe
 | Grading | `lib/pitch-lab/grading.js` | Entry = first close after the pitch; exit = close N trading sessions later; success = return after round-trip costs **minus** the benchmark (SPY) over the same sessions. |
 | Analysis | `lib/pitch-lab/analysis.js` | Per time period × holding period: conviction and per-metric correlation factors with uncertainty. |
 | Statistics | `lib/pitch-lab/stats.js` | Spearman, clustered regression, cluster bootstrap, t-distribution, Benjamini–Hochberg. Pure, no dependencies. |
-| Storage | `lib/pitch-lab/store.js` | Append-only JSON-lines files in `data/pitch-lab/` (git-ignored). No update/delete; duplicates refused. |
+| Storage | `lib/pg/pitch-lab-store.js` + migration `0010` | Canonical Postgres selections, pitches, and outcomes. Unique constraints refuse duplicates; database triggers reject update/delete. `lib/pitch-lab/store.js` remains the local demo/test adapter. |
 | Peer ranks | `lib/pitch-lab/peer-rank.js` | Pure. Ranks each of the 9 mandate metrics against the company's industry peers (see below). |
-| Peer bridge | `lib/pitch-lab-peer-bridge.js` | The **only** module that touches the database: reads `pm:peer-metrics`, and (flag-gated) files peer-coverage requests. Not imported by anything in `lib/pitch-lab/`. |
+| Peer bridge | `lib/pitch-lab-peer-bridge.js` | Reads `pm:peer-metrics` and (flag-gated) files peer-coverage requests. It is kept outside the pure analysis modules. |
 | Preview | `lib/pitch-lab/render-html.js` | Self-contained HTML view of a report. |
 | CLI | `scripts/pitch-lab.js` | `demo`, `record`, `grade`, `analyze`, `coverage`. |
 | Selection | `lib/pitch-lab/selection.js` | Pure daily pick: 10 ranked + 5 random from Agent One's screened catalog; writes a per-date receipt. |
@@ -55,7 +56,8 @@ npm run pitch-lab -- coverage             # fill rates: how often each metric wa
 node scripts/pitch-lab-peer-check.js NET  # dry run: fetch like the scan, rank against the live peer table (Jetson)
 ```
 
-Options: `--dir=` (or `PITCH_LAB_DIR`), `--horizons=5,10,20`, `--benchmark=SPY`,
+The local CLI uses JSONL for demos and offline inspection. Scheduled jobs require
+`DATABASE_URL` and use Postgres. CLI options: `--dir=` (or `PITCH_LAB_DIR`), `--horizons=5,10,20`, `--benchmark=SPY`,
 `--cost=0.001` (per side). The demo plants known effects (conviction +, revenue
 growth +, forward P/E −, everything else noise) and the analysis recovers them —
 that is also a test (`tests/pitch-lab.test.js`).
@@ -99,10 +101,11 @@ metrics, where the company sits among its industry peers at pitch time.
   metric, how many pitches were ranked / thin / unranked / unrecorded and the missing
   reasons — the real peer coverage, once pitches come from live data.
 
-### The bridge (the only database contact)
+### Database boundaries
 
-Pitch Lab stays database-free (a test fails if it imports Redis, Sheets, Postgres or a
-broker). `lib/pitch-lab-peer-bridge.js` is the one seam, and a test pins what it may use:
+The pure `lib/pitch-lab/` analysis and grading modules stay database-free. The
+scheduled job uses two reviewed seams: `lib/pg/pitch-lab-store.js` for canonical
+records, and `lib/pitch-lab-peer-bridge.js` for peer data and the report projection:
 
 - **Read:** `getPeerMetrics()` — the peer table the nightly peer jobs maintain.
 - **Write:** `requestPeerCoverage()` — the existing bounded, ticker-keyed request queue
@@ -120,14 +123,23 @@ its `peers` result to `buildPitch` / `pitchFromModelResponse`.
 ## Daily loop
 
 ```
-18:40 ET Mon–Fri  pitch-lab-daily   draw 15 → fetch (Yahoo/EDGAR/bars) → peer ranks → one budgeted model call each → append pitch
-19:10 ET Mon–Fri  pitch-lab-grade   grade matured 5/10/20-day outcomes (append-only)
-10:00 ET Sat      pitch-lab-report  analyse → data/pitch-lab/report.json+html → `pitchlab:report` key for the website
+18:40 ET Mon–Fri  pitch-lab-daily   draw 15 → fetch → peer ranks → model calls → append pitches → grade → one digest
+10:00 ET Sat      pitch-lab-report  analyse → publish report → one weekly Telegram learning report
 ```
 
-Start it (it idles unless enabled): `PITCH_LAB_ENABLED=1 pm2 start pitch-lab-scheduler.js --name pitch-lab`.
+Start it disabled from the repository directory with `PITCH_LAB_ENABLED=0` in the
+shared `.env`: `pm2 start pitch-lab-scheduler.js --name pitch-lab`. Do not pass
+the gate as an inline PM2 environment variable; both `portfolio-manager` and
+`pitch-lab` must read the same `.env` value so weekly phone ownership agrees.
 One-off: `PITCH_LAB_ENABLED=1 node jobs/pitch-lab-daily.js daily --dry-run` (builds every prompt, calls no
 model, records nothing); drop `--dry-run` to pitch, or use `grade` / `report`.
+
+To enable after migration, restore verification, peer check, and dry run: set
+`PITCH_LAB_ENABLED=1` in the shared `.env`, then restart **both** PM2 apps. Verify
+the main scheduler suppresses its legacy Agent 1 weekly phone summary and the
+Pitch Lab scheduler reports enabled. If the Pitch Lab app was ever started with
+an inline gate, delete and recreate that PM2 app without the inline variable so
+the shared `.env` remains authoritative.
 
 - **Selection** (`selection.js`): names must pass Agent One's live catalog screen
   (`screenCatalogForAgent`) and have a quote price. **10 "screen"** picks are the top of Agent One's own
@@ -135,14 +147,15 @@ model, records nothing); drop `--dry-run` to pitch, or use `grade` / `report`.
   the ranking would have skipped. A name pitched in the last 14 days is skipped. Peer-readiness is **not** a
   filter. There is no "mover" slot yet (the catalog has only a 52-week change). A short pool gives a short day,
   recorded as `shortfall`, never padded.
-- **The draw is recorded before any pitch and a date is drawn once** (`selections.jsonl`). A crashed or
+- **The draw is recorded in Postgres before any pitch and a date is drawn once.** A crashed or
   budget-stopped run resumes the same names; it can never re-roll after seeing a partial result.
 - **Spend:** every call goes through the monthly Anthropic ceiling (role `pitch_lab`, which draws from the
   non-protected pool, so holdings monitoring is served first) and usage telemetry. Per-run caps:
-  `PITCH_LAB_MAX_PITCHES` (15), `PITCH_LAB_MAX_USD` (1.00). A budget stop ends the run; other failures drop
-  only that name.
-- **Failure is loud:** a dropped pitch, an empty/short selection, an unavailable catalog, a budget stop, a
-  failed job — each logs `console.error` and sends Telegram. A reply that is not exactly one valid JSON object,
+  `PITCH_LAB_MAX_PITCHES` (15), `PITCH_LAB_MAX_USD` (1.00). The next request's
+  worst-case cost must fit inside the remaining run cap before the provider is called. A budget stop ends the run;
+  other failures drop only that name.
+- **Failure is visible:** a dropped pitch, an empty/short selection, an unavailable catalog, a budget stop, a
+  failed job, or a Postgres write failure is logged. Telegram gives one daily human digest plus action-required whole-job failures. A reply that is not exactly one valid JSON object,
   or fails pitch validation, is dropped, never repaired.
 - **Timing:** pitches are made after the 16:00 close, so graded entry is the **next** session's close
   (`grading.js` rule); the stored reference price is the last close, context only.
@@ -150,12 +163,25 @@ model, records nothing); drop `--dry-run` to pitch, or use `grade` / `report`.
   means it cannot change that surface (tested: `scheduler.js` must not mention Pitch Lab). Deploying the new
   PM2 app is a separate, reviewed step — `npm run deploy:restart` only restarts `portfolio-manager`.
 
+### Frozen launch evaluation contract
+
+`pitch-lab.grading.v1` was frozen before launch on 2026-10-14:
+
+- Entry is the first market close after the pitch timestamp. Because the
+  scheduled pitch run is after 16:00 ET, its entry is the next trading session's
+  close.
+- Outcomes are measured 5, 10, and 20 trading sessions after entry.
+- SPY is the benchmark over the identical entry and exit sessions.
+- Stock returns include 10 basis points of cost on entry and 10 basis points on
+  exit; excess return is that net stock return minus SPY's return.
+
+Changing any of these rules requires a new `GRADING_VERSION`; existing outcomes
+remain immutable and are never silently reinterpreted.
+
 ### Not covered (still open)
 
-- **Entry timing, horizons, benchmark (plan D-1) are still placeholders** (next-close entry, 5/10/20 days, SPY)
-  and must be fixed before the first pitch is graded for real.
 - **No "mover" selection slot, no catalyst / macro-regime / fixed-reason-list features, no exit-rule
-  counterfactual, storage is local JSONL (Postgres move pending), and no website endpoint (D-3).**
+  counterfactual, and no website endpoint (D-3).**
 - **Grading is still against SPY only.** A pitch that beat SPY because its whole sector
   rallied still counts as a win. Sector-relative grading needs sector return data and is
   a separate step.
@@ -236,15 +262,9 @@ site only ever reads.
 
 ## Next steps (not done yet)
 
-1. **Generate pitches from Agent One.** Wire `buildPitchPrompt` → Anthropic call
-   (through the existing budget + usage telemetry, `lib/anthropic-monthly-budget.js`,
-   `lib/anthropic-usage.js`) → `pitchFromModelResponse` → store, fed by
-   `buildFeatures` from data the research scan already fetches. Sam Huffard's
-   prototype branch (`claude/research-lab-2026-09-23`) has a dry-run research path
-   that could supply the candidates; decide together before building a second one.
-2. **Decide the horizon (plan D-1).** Defaults are 5/10/20 trading days.
-3. **Move storage** from local files to Postgres (`db/migrations/`) or `proto:*`
-   Redis once it runs on the Jetson; `store.js` keeps the same four functions.
+1. Apply migration `0010`, deploy the separate scheduler disabled, then run the
+   peer check and daily `--dry-run` on the Jetson.
+2. Add the read-only website page backed by the published `pitchlab:report` key.
+3. Hand consensus and 13F observations into the Pitch Lab feature snapshot.
 4. **Conviction beyond the metrics:** a multivariate model to test whether
    conviction adds information the metrics don't already carry.
-5. Schedule it (`scheduler.js`) only after 1–3 are reviewed.

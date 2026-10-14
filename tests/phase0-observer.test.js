@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { buildPhase0Observation, formatPhase0Observation } from "../lib/phase0-observer.js";
-import { consumedResearchRunIds, deployedRevision, dueCriticalJobNames, dueObservedJobs, finalSentinelIsFresh, latestScheduledResearch, mapAnthropicBudgetReadiness, observationPersistenceWindowIsOpen, persistPhase0Observation, selectUnobservedScheduledResearch } from "../jobs/phase0-observer.js";
+import { consumedResearchRunIds, deliverPhase0Telegram, deployedRevision, dueCriticalJobNames, dueObservedJobs, finalSentinelIsFresh, latestScheduledResearch, mapAnthropicBudgetReadiness, observationPersistenceWindowIsOpen, persistPhase0Observation, selectUnobservedScheduledResearch, shouldSendPhase0Telegram } from "../jobs/phase0-observer.js";
 import { blankOutcomeCounts, RESEARCH_OUTCOME_VERSION } from "../lib/research-run-report.js";
 import { buildHoldingMonitorCoverage } from "../lib/holding-monitor-coverage.js";
 import { signPhase0Observation } from "../lib/phase0-observation-ledger.js";
@@ -13,6 +13,39 @@ import { signMcpReadReceipt } from "../contracts/mcp-read-job.js";
 
 const DATE = "2026-07-14";
 const MCP_RECEIPT_SECRET = "phase0-mcp-receipt-test-secret";
+
+test("Phase 0 stays internal unless trust fails or the legacy all-feed is explicit", () => {
+  assert.equal(shouldSendPhase0Telegram({ trustVerdict: "PASS", skillVerdict: "FAIL" }, {}), false);
+  assert.equal(shouldSendPhase0Telegram({ trustVerdict: "FAIL", skillVerdict: "PASS" }, {}), true);
+  assert.equal(shouldSendPhase0Telegram({
+    trustVerdict: "FAIL",
+    checks: [{ name: "valuation_status", domain: "TRUST", status: "fail" }],
+  }, {}), false);
+  assert.equal(shouldSendPhase0Telegram({
+    trustVerdict: "FAIL",
+    checks: [
+      { name: "valuation_status", domain: "TRUST", status: "fail" },
+      { name: "open_p0_p1", domain: "TRUST", status: "fail" },
+    ],
+  }, {}), true);
+  assert.equal(shouldSendPhase0Telegram({ trustVerdict: "PASS" }, { PHASE0_TELEGRAM_MODE: "all" }), true);
+});
+
+test("suppressed Phase 0 delivery writes the durable action-only marker", async () => {
+  const values = new Map();
+  let sends = 0;
+  const redis = {
+    async get(key) { return values.get(key) ?? null; },
+    async set(key, value) { values.set(key, value); return "OK"; },
+  };
+  const result = await deliverPhase0Telegram(
+    { dateET: DATE, trustVerdict: "PASS", skillVerdict: "FAIL" },
+    { redis, env: {}, send: async () => { sends += 1; } },
+  );
+  assert.deepEqual(result, { status: "suppressed", marker: "suppressed:action-only" });
+  assert.equal(values.get(`pm:phase0-observation:${DATE}:telegram-sent`), "suppressed:action-only");
+  assert.equal(sends, 0);
+});
 
 test("deployed revision prefers the code identity pinned by the PM2 restart wrapper", async () => {
   let gitCalled = false;
