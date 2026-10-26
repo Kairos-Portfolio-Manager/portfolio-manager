@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { getRedis } from "../lib/redis.js";
 import { isTradingDate } from "../lib/market-calendar.js";
 import { planAlerts } from "../lib/alerting/policy.js";
-import { lastSaturday, runOpsChecks, summarizeReadHistory } from "../lib/ops-watch/checks.js";
+import { lastSaturday, runOpsChecks, summarizeReadState } from "../lib/ops-watch/checks.js";
 import { sendMessage } from "../lib/telegram.js";
 
 // Ops-watch: a small, separate PM2 process (ops-watch-scheduler.js) that watches the
@@ -18,7 +18,7 @@ import { sendMessage } from "../lib/telegram.js";
 // clock, and separate from the Pitch Lab process so it can notice that process dying.
 //
 // Write surface: pm:opswatch:* keys and Telegram. Reads only everywhere else.
-// Read-failure streaks come from the reader's existing receipt history (pm:job:<kind>:history:<date>).
+// Read-failure state comes from the reader's existing receipts (pm:job:<kind>:last-run + that request's history).
 
 const pExecFile = promisify(execFile);
 
@@ -86,14 +86,22 @@ export async function gatherInputs({ redis = getRedis(), now = new Date(), env =
 
   const heartbeatMs = heartbeatRaw === undefined ? undefined : heartbeatRaw === null ? null : Date.parse(String(heartbeatRaw));
 
-  // Failure streak per read kind, from the reader's own per-attempt receipts (yesterday + today, oldest first).
-  const yesterday = etParts(new Date(nowMs - 24 * 3600 * 1000)).date;
+  // Read-failure state per kind from the reader's own receipts: the latest attempt's `last-run`, plus the
+  // history of THAT request (its date can be days old — a failed request stays at the head of the queue).
   let readHealth = {};
   for (const kind of READ_KINDS) {
-    const days = await Promise.all([yesterday, et.date].map((date) => (redis ? readKey(redis, async () => (await redis.lrange(historyKey(kind, date), 0, -1)) ?? []) : undefined)));
-    if (days.some((day) => day === undefined)) { readHealth = undefined; break; }
-    readHealth[kind] = summarizeReadHistory(days.flat().map(parseJson));
+    const lastRunRaw = redis ? await readKey(redis, async () => (await redis.get(`pm:job:${kind}:last-run`)) ?? null) : undefined;
+    if (lastRunRaw === undefined) { readHealth = undefined; break; }
+    const lastRun = parseJson(lastRunRaw);
+    let history = [];
+    if (lastRun?.outcome === "failed" && /^\d{4}-\d{2}-\d{2}$/.test(String(lastRun.dateET))) {
+      const rows = await readKey(redis, async () => (await redis.lrange(historyKey(kind, lastRun.dateET), 0, -1)) ?? []);
+      if (rows === undefined) { readHealth = undefined; break; }
+      history = rows.map(parseJson);
+    }
+    readHealth[kind] = summarizeReadState({ lastRun, history });
   }
+
   const trading = isTradingDay(et);
 
   return {

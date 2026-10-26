@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import {
-  checkBrokerReader, checkPitchLab, checkSentinelLiveness, lastSaturday, summarizeReadError, summarizeReadHistory, READ_FAILURE_THRESHOLD, runOpsChecks,
+  checkBrokerReader, checkPitchLab, checkSentinelLiveness, lastSaturday, summarizeReadError, summarizeReadState, READ_FAILURE_THRESHOLD, runOpsChecks,
 } from "../lib/ops-watch/checks.js";
 import { runOpsWatch, gatherInputs, OPS_STATE_KEY, etParts } from "../jobs/ops-watch.js";
 
@@ -16,25 +16,32 @@ test("reader: healthy reader, fresh heartbeat, no failures -> nothing", () => {
   assert.deepEqual(checkBrokerReader({ processes: procs(), heartbeatMs: NOW - 60000, readHealth: null, nowMs: NOW }), []);
 });
 
-test("the incident: N consecutive MCP read failures names the kind, count, date and the CLI hint", () => {
-  const readHealth = { "holdings-sync": { consecutiveFailures: 523, firstFailureAt: "2026-10-16T13:30:00.000Z", lastFailureAt: "2026-10-26T13:30:00Z", lastSuccessAt: "2026-09-22T16:30:00Z", lastError: 'Claude CLI failed (exit 1): {"type":"system","cwd":"/home/sam/x","tools":["Task"]}' } };
-  const out = checkBrokerReader({ processes: procs(), heartbeatMs: NOW - 60000, readHealth, nowMs: NOW });
+const stuck = (over = {}) => ({ consecutiveFailures: 523, requestedAt: "2026-10-19T13:30:00.000Z", lastFailureAt: "2026-10-25T08:24:35.142Z", lastError: 'failed to fetch positions from Robinhood: Claude CLI failed (exit 1): {"type":"system","cwd":"/home/sam/x","tools":["Task"]}', ...over });
+
+test("the incident: a request failing since Oct 19 is named, with its age, last attempt and the CLI hint", () => {
+  const out = checkBrokerReader({ processes: procs(), heartbeatMs: NOW - 60000, readHealth: { "holdings-sync": stuck() }, nowMs: NOW });
   assert.equal(out.length, 1);
   assert.equal(out[0].severity, "P1");
-  assert.match(out[0].title, /holdings-sync \(523 in a row since 2026-10-16 13:30Z\)/);
-  assert.match(out[0].detail, /Claude CLI failed \(exit 1\)\. Last success 2026-09-22/);
+  assert.match(out[0].title, /holdings-sync \(523 failed attempts; the request from 2026-10-19 13:30Z is still unfulfilled\)/);
+  assert.match(out[0].detail, /Claude CLI failed \(exit 1\)\. Last attempt 2026-10-25 08:24Z\./);
+  assert.match(out[0].detail, /later reads queue behind it/);
   assert.match(out[0].detail, /claude auth status/);
   assert.ok(!out[0].detail.includes("/home/sam"), "the CLI JSON dump is not forwarded to Telegram");
 });
 
-test("below the failure threshold is quiet; at the threshold it fires", () => {
-  const at = (n) => checkBrokerReader({ processes: procs(), heartbeatMs: NOW, readHealth: { "holdings-sync": { consecutiveFailures: n, lastError: "x" } }, nowMs: NOW });
-  assert.equal(at(READ_FAILURE_THRESHOLD - 1).length, 0);
-  assert.equal(at(READ_FAILURE_THRESHOLD).length, 1);
+test("persistence rule: 3+ failed attempts, OR one request failing for 2+ hours; a fresh single failure is quiet", () => {
+  const at = (state) => checkBrokerReader({ processes: procs(), heartbeatMs: NOW, readHealth: { "holdings-sync": { lastError: "x", ...state } }, nowMs: NOW }).length;
+  const recent = new Date(NOW - 10 * 60000).toISOString();
+  const old = new Date(NOW - 3 * 3600000).toISOString();
+  assert.equal(at({ consecutiveFailures: 1, requestedAt: recent }), 0, "a single fresh failure may be transient");
+  assert.equal(at({ consecutiveFailures: READ_FAILURE_THRESHOLD - 1, requestedAt: recent }), 0);
+  assert.equal(at({ consecutiveFailures: READ_FAILURE_THRESHOLD, requestedAt: recent }), 1);
+  assert.equal(at({ consecutiveFailures: 1, requestedAt: old }), 1, "one request stuck for hours is persistent even if history was trimmed");
+  assert.equal(at({ consecutiveFailures: 0, requestedAt: old }), 0, "a success clears it");
 });
 
 test("fingerprints are stable across counts so dedup works", () => {
-  const f = (n) => checkBrokerReader({ processes: procs(), heartbeatMs: NOW, readHealth: { "holdings-sync": { consecutiveFailures: n, lastError: "x" } }, nowMs: NOW })[0].fingerprint;
+  const f = (n) => checkBrokerReader({ processes: procs(), heartbeatMs: NOW, readHealth: { "holdings-sync": stuck({ consecutiveFailures: n }) }, nowMs: NOW })[0].fingerprint;
   assert.equal(f(3), f(600));
 });
 
@@ -136,12 +143,15 @@ function fakeRedis(initial = {}) {
   };
 }
 
-const failed = (n, day = "2026-10-26", error = "Claude CLI failed (exit 1)") => Array.from({ length: n }, (_, i) => JSON.stringify({ outcome: "failed", ok: false, ts: `${day}T${String(13 + i).padStart(2, "0")}:30:00.000Z`, error }));
+const REQ = "e4874666-adde-4fd4-99da-9fe880ea3fa3";
+const failedRows = (n, error = "Claude CLI failed (exit 1)") => Array.from({ length: n }, (_, i) => JSON.stringify({ outcome: "failed", ok: false, requestId: REQ, completedAt: `2026-10-2${i % 6}T08:24:35.000Z`, error }));
+const lastRun = (kind, over = {}) => JSON.stringify({ kind, requestId: REQ, requestedAt: "2026-10-19T13:30:00.020Z", completedAt: "2026-10-25T08:24:35.142Z", dateET: "2026-10-19", outcome: "failed", ok: false, error: "Claude CLI failed (exit 1): {\"type\":\"system\"}", ...over });
 const HIST = (kind, date) => `pm:job:${kind}:history:${date}`;
 
-test("end to end: a failing reader -> one Telegram, state persisted, no repeat on the next tick, resolved note on recovery", async () => {
+test("end to end: the REAL production shape (request stuck since Oct 19) -> one Telegram, quiet next tick, digest, resolved on recovery", async () => {
   const redis = fakeRedis({
-    [HIST("holdings-sync", "2026-10-26")]: failed(5),
+    "pm:job:holdings-sync:last-run": lastRun("holdings-sync"),
+    [HIST("holdings-sync", "2026-10-19")]: failedRows(5),
     "pm:sysloop:last-run": JSON.stringify({ date: "2026-10-26" }),
     "pitchlab:telegram:weekly:2026-10-24": "2026-10-24T14:00:03.000Z",
   });
@@ -156,41 +166,47 @@ test("end to end: a failing reader -> one Telegram, state persisted, no repeat o
   assert.equal(first.status, "ok");
   assert.equal(sent.length, 1);
   assert.match(sent[0], /1 new urgent finding/);
-  assert.match(sent[0], /Broker reads failing: holdings-sync \(5 in a row since 2026-10-26 13:30Z\)/);
-  assert.match(sent[0], /Claude CLI failed \(exit 1\)/);
+  assert.match(sent[0], /Broker reads failing: holdings-sync \(5 failed attempts; the request from 2026-10-19 13:30Z is still unfulfilled\)/);
   assert.ok(JSON.parse(redis.store.get(OPS_STATE_KEY)).open);
   assert.ok(redis.store.get("pm:opswatch:last-run"));
 
   await runOpsWatch({ ...common, now: at("2026-10-26T15:30:00Z") });
   assert.equal(sent.length, 1, "next tick, same day: quiet");
 
-  redis.store.set(HIST("holdings-sync", "2026-10-27"), failed(2, "2026-10-27")); // still failing the next morning
   await runOpsWatch({ ...common, now: at("2026-10-27T12:00:00Z") }); // 08:00 ET Tuesday: digest
   assert.equal(sent.length, 2);
   assert.match(sent[1], /1 still open/);
 
-  redis.store.set(HIST("holdings-sync", "2026-10-27"), [...failed(2, "2026-10-27"), JSON.stringify({ outcome: "ok", ok: true, ts: "2026-10-27T13:31:00.000Z" })]);
+  redis.store.set("pm:job:holdings-sync:last-run", lastRun("holdings-sync", { outcome: "ok", ok: true, error: null, completedAt: "2026-10-27T13:31:00.000Z" }));
   await runOpsWatch({ ...common, now: at("2026-10-27T12:30:00Z") });
   assert.equal(sent.length, 3);
   assert.match(sent[2], /resolved/);
 });
 
-test("summarizeReadHistory: streak, first/last failure, last success; mismatch is not a failure; junk is ignored", () => {
-  const rows = [
-    { outcome: "ok", ts: "2026-10-25T20:00:00Z" },
-    { outcome: "failed", ts: "2026-10-26T13:30:00Z", error: "a" },
-    { outcome: "failed", ts: "2026-10-26T14:30:00Z", error: "b" },
-    null, "junk", { nope: true },
+test("summarizeReadState: uses the stuck request's own attempts; other requests, mismatches and junk never count", () => {
+  const run = JSON.parse(lastRun("holdings-sync"));
+  const history = [
+    { outcome: "failed", requestId: "someone-else", completedAt: "2026-10-18T00:00:00Z" },
+    { outcome: "ok", requestId: REQ, completedAt: "2026-10-19T13:31:00Z" },
+    { outcome: "failed", requestId: REQ, completedAt: "2026-10-19T14:00:00Z" },
+    { outcome: "failed", requestId: REQ, completedAt: "2026-10-19T15:00:00Z" },
+    null, "junk",
   ];
-  assert.deepEqual(summarizeReadHistory(rows), { consecutiveFailures: 2, firstFailureAt: "2026-10-26T13:30:00Z", lastFailureAt: "2026-10-26T14:30:00Z", lastSuccessAt: "2026-10-25T20:00:00Z", lastError: "b" });
-  assert.equal(summarizeReadHistory([...rows, { outcome: "mismatch", ts: "2026-10-26T15:00:00Z" }]).consecutiveFailures, 0);
-  assert.equal(summarizeReadHistory(undefined).consecutiveFailures, 0);
-  assert.equal(summarizeReadHistory([{ outcome: "failed", ts: "t" }]).lastSuccessAt, null);
+  const state = summarizeReadState({ lastRun: run, history });
+  assert.equal(state.consecutiveFailures, 2);
+  assert.equal(state.requestedAt, "2026-10-19T13:30:00.020Z");
+  assert.equal(state.firstFailureAt, "2026-10-19T14:00:00Z");
+  assert.equal(state.lastFailureAt, "2026-10-25T08:24:35.142Z");
+  assert.equal(summarizeReadState({ lastRun: { ...run, outcome: "ok" }, history }).consecutiveFailures, 0);
+  assert.equal(summarizeReadState({ lastRun: { ...run, outcome: "mismatch" }, history }).consecutiveFailures, 0, "a completed mismatch read is not a failure");
+  assert.equal(summarizeReadState({ lastRun: run, history: [] }).consecutiveFailures, 1, "the last-run receipt is itself a failed attempt");
+  assert.equal(summarizeReadState({}).consecutiveFailures, 0);
 });
 
 test("end to end: Telegram failure is retried, not recorded as announced; a weekend still runs; a missing Redis does not throw", async () => {
   const redis = fakeRedis({
-    [HIST("order-reconciliation", "2026-10-26")]: failed(4, "2026-10-26", "x"),
+    "pm:job:order-reconciliation:last-run": lastRun("order-reconciliation"),
+    [HIST("order-reconciliation", "2026-10-19")]: failedRows(4, "x"),
     "pm:sysloop:last-run": JSON.stringify({ date: "2026-10-26" }),
     "pitchlab:telegram:weekly:2026-10-24": "2026-10-24T14:00:03.000Z",
   });
