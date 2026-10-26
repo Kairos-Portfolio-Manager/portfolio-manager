@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import {
-  checkBrokerReader, checkPitchLab, checkSentinelLiveness, lastSaturday, summarizeReadError, summarizeReadState, READ_FAILURE_THRESHOLD, runOpsChecks,
+  checkBrokerReader, checkPitchLab, checkSentinelLiveness, lastSaturday, summarizeReadError, summarizeReadState, weeklyTarget, READ_FAILURE_THRESHOLD, runOpsChecks,
 } from "../lib/ops-watch/checks.js";
 import { runOpsWatch, gatherInputs, OPS_STATE_KEY, etParts } from "../jobs/ops-watch.js";
 
@@ -102,15 +102,34 @@ test("pitch lab: digest not delivered (missing or stuck in-flight) -> P1", () =>
   assert.match(checkPitchLab(pitch({ dailyDigest: "sending" }))[0].detail, /in-flight/);
 });
 
-test("pitch lab: weekly report not delivered for the last Saturday -> P1 (after 11:00 ET)", () => {
+test("pitch lab: weekly report not delivered for the last Saturday -> P1, at any hour on a weekday", () => {
   assert.match(titles(checkPitchLab(pitch({ weeklyDigest: null })))[0], /weekly report for 2026-10-24/);
-  assert.deepEqual(checkPitchLab(pitch({ weeklyDigest: null, nowET: et("2026-10-26", 9, 0) })), []);
+  assert.match(titles(checkPitchLab(pitch({ weeklyDigest: null, nowET: et("2026-10-26", 9, 0) })))[0], /weekly report for 2026-10-24/);
+});
+
+test("the regression (Codex): a failed Saturday report pages on SATURDAY (after 11:00 ET), not Monday; before 11:00 it is still on its way", () => {
+  const sat = (hour, minute = 0) => pitch({ isTradingDay: false, nowET: et("2026-10-31", hour, minute, "Sat"), weeklyDigest: null, dailyRun: undefined, dailyDigest: undefined });
+  assert.match(titles(checkPitchLab(sat(11, 30)))[0], /weekly report for 2026-10-31/, "today's report is the target after 11:00");
+  assert.match(titles(checkPitchLab(sat(9, 30)))[0], /weekly report for 2026-10-24/, "before 11:00 the target is last Saturday, which is already delivered in real life, so this fixture only proves the date");
+  assert.equal(checkPitchLab(pitch({ isTradingDay: false, nowET: et("2026-10-31", 11, 30, "Sat"), weeklyDigest: "2026-10-31T14:00:02.000Z" })).length, 0, "delivered Saturday report: quiet, and trading-day checks are skipped");
+  assert.equal(weeklyTarget(et("2026-11-01", 12, 0, "Sun")), "2026-10-31");
 });
 
 test("pitch lab: process down is flagged even on a holiday/weekend-style non-trading run", () => {
   const down = checkPitchLab(pitch({ processes: [online("portfolio-manager")], isTradingDay: false }));
   assert.match(titles(down)[0], /not registered in PM2/);
   assert.equal(down.length, 1, "date-specific checks are skipped on non-trading days");
+});
+
+test("a present-but-malformed last-run receipt fails closed instead of reading as healthy (Codex)", async () => {
+  for (const bad of ["not json {", JSON.stringify({ outcome: 7 }), JSON.stringify({ outcome: "failed", kind: "order-reconciliation" })]) {
+    const redis = fakeRedis({ "pm:job:holdings-sync:last-run": bad, "pm:sysloop:last-run": JSON.stringify({ date: "2026-10-26" }), "pitchlab:telegram:weekly:2026-10-24": "2026-10-24T14:00:03.000Z" });
+    redis.store.set("pm:broker-reader:last-seen", new Date("2026-10-26T14:59:00Z").toISOString());
+    const sent = [];
+    await runOpsWatch({ redis, env: {}, log: { log() {}, error() {} }, send: async (m) => { sent.push(m); }, listProcesses: async () => procs(), now: new Date("2026-10-26T15:00:00Z") });
+    assert.equal(sent.length, 1, `malformed receipt ${bad} must page`);
+    assert.match(sent[0], /cannot read the broker read receipt history/);
+  }
 });
 
 test("pitch lab: unreadable markers fail closed", () => {

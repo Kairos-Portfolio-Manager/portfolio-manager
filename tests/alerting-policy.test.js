@@ -159,8 +159,14 @@ test("digest hidden items keep the digest due; once everything has been named th
   assert.equal(c.text, null);
 });
 
-test("a single oversize finding never produces an empty or oversize message and stays pending", () => {
-  const huge = p1("h", "T".repeat(4000), "D".repeat(4000));
-  const plan = planAlerts({ findings: [huge], now: t0, dateET: "2026-10-26", digest: false });
-  assert.ok(!plan.text || plan.text.length <= 3500);
+test("the regression (Codex): an oversize title is truncated, shown, and cannot starve later findings", () => {
+  const huge = p1("a-huge", "T".repeat(4000), "D".repeat(4000));
+  const normal = p1("b-normal", "Normal finding");
+  const plan = planAlerts({ findings: [huge, normal], now: t0, dateET: "2026-10-26", digest: false });
+  assert.ok(plan.text && plan.text.length <= 3500);
+  assert.ok(plan.shownFingerprints.includes("a-huge"), "the oversize one is named (truncated)");
+  assert.ok(plan.shownFingerprints.includes("b-normal"), "and does not starve the next one");
+  assert.ok(!/T{300}/.test(plan.text), "title is capped");
+  const hugeOnly = planAlerts({ findings: [p1("x", "Q".repeat(9000), "")], now: t0, dateET: "2026-10-26", digest: false });
+  assert.ok(hugeOnly.text.length <= 3500 && hugeOnly.shownFingerprints.includes("x"));
 });

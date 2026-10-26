@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { getRedis } from "../lib/redis.js";
 import { isTradingDate } from "../lib/market-calendar.js";
 import { planAlerts } from "../lib/alerting/policy.js";
-import { lastSaturday, runOpsChecks, summarizeReadState } from "../lib/ops-watch/checks.js";
+import { runOpsChecks, summarizeReadState, weeklyTarget } from "../lib/ops-watch/checks.js";
 import { sendMessage } from "../lib/telegram.js";
 
 // Ops-watch: a small, separate PM2 process (ops-watch-scheduler.js) that watches the
@@ -82,7 +82,7 @@ export async function gatherInputs({ redis = getRedis(), now = new Date(), env =
     get(`pitchlab:run:daily:${et.date}`),
     get(`pitchlab:telegram:daily:${et.date}`),
   ]);
-  const weeklyDigest = await get(`pitchlab:telegram:weekly:${lastSaturday(et.date)}`);
+  const weeklyDigest = await get(`pitchlab:telegram:weekly:${weeklyTarget(et)}`);
 
   const heartbeatMs = heartbeatRaw === undefined ? undefined : heartbeatRaw === null ? null : Date.parse(String(heartbeatRaw));
 
@@ -93,6 +93,12 @@ export async function gatherInputs({ redis = getRedis(), now = new Date(), env =
     const lastRunRaw = redis ? await readKey(redis, async () => (await redis.get(`pm:job:${kind}:last-run`)) ?? null) : undefined;
     if (lastRunRaw === undefined) { readHealth = undefined; break; }
     const lastRun = parseJson(lastRunRaw);
+    // Present-but-malformed receipt state must fail closed (an unreadable receipt is not a healthy one).
+    if (lastRunRaw !== null && !(lastRun && typeof lastRun === "object" && typeof lastRun.outcome === "string" && (lastRun.kind === undefined || lastRun.kind === kind))) {
+      console.error(`[OpsWatch] pm:job:${kind}:last-run is present but malformed; treating as unreadable`);
+      readHealth = undefined;
+      break;
+    }
     let history = [];
     if (lastRun?.outcome === "failed" && /^\d{4}-\d{2}-\d{2}$/.test(String(lastRun.dateET))) {
       const rows = await readKey(redis, async () => (await redis.lrange(historyKey(kind, lastRun.dateET), 0, -1)) ?? []);

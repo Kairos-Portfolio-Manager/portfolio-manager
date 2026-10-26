@@ -186,11 +186,11 @@ pm2 describe portfolio-broker-reader
     If the error is a Claude CLI failure, run `claude auth status` on the Jetson and log in
     (interactive — Sam does this).
   - Pitch Lab: watched when `PITCH_LAB_ENABLED=1` is visible to ops-watch (it reads the same `.env`) **or**
-    the `pitch-lab` PM2 process exists. To pause watching, `pm2 stop pitch-lab`. Checks: PM2 online; by
+    the `pitch-lab` PM2 process exists. To pause watching on purpose: set `PITCH_LAB_ENABLED=0` in `.env` **and** `pm2 delete pitch-lab` (a merely stopped app still exists, so it is still watched and reported). Checks: PM2 online; by
     19:30 ET a `pitchlab:run:daily:<date>` marker exists and is not `no_catalog`/`budget_stop`/zero
     pitches (the cycle starts 18:40 and takes ~5 min, so 19:30 is a ~50 min margin; a run slower than
     that is itself a finding); the digest marker `pitchlab:telegram:daily:<date>` is a delivery timestamp
-    (not `sending`); last Saturday's `pitchlab:telegram:weekly:<date>` exists. A partial run is P2.
+    (not `sending`); the weekly marker `pitchlab:telegram:weekly:<date>` exists for the most recent Saturday (today's from 11:00 ET on a Saturday, so a failed report pages Saturday; checked every day, holidays included). A partial run is P2.
   - Sentinel liveness: `portfolio-manager` online and `pm:sysloop:last-run` is today by 20:30 ET.
   - Limits, stated plainly: the **sentinel's** daily digest only runs on trading days (it lives in
     `scheduler.js`, which this work deliberately does not touch), so a sentinel-found P0/P1 open over a
