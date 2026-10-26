@@ -162,6 +162,35 @@ pm2 describe portfolio-broker-reader
 - **`ops/FIXLIST.md` is the single readable view** of everything above — regenerated after every triage/weekly pass, or manually via `npm run sysloop:fixlist` after editing a finding's status. Claude Code sessions read it at session start (pointer in `CLAUDE.md`).
 - LLM tiers run `claude -p` on the Mac (subscription, not API), read-only tools, no MCP. Telegram alerts come from the Jetson sentinel; Mac-side alerts are console-only until `TELEGRAM_*` is added to the Mac `.env`.
 
+## Telegram alerting (alert policy + ops-watch)
+
+- **Policy** (`lib/alerting/policy.js`, pure, shared): a P0/P1 is Telegrammed immediately when
+  new; every still-open P0/P1 is re-announced in **one digest per ET day** with its age ("open 9d
+  (since 2026-08-18)"); a cleared one gets a "resolved" note; nothing open = silence. A failed
+  Telegram send is **not** recorded as announced, so the next run retries (the old sentinel marked
+  it announced anyway and then never mentioned it again). Alert state is `pm:sysloop:alert-state`
+  (sentinel) and `pm:opswatch:alert-state` (ops-watch). First run after the upgrade digests
+  everything already open as "age unknown", then ages from that day.
+- **Sentinel** (`jobs/system-sentinel.js`): unchanged anomalies/snapshot/Phase 0 evidence; only the
+  Telegram delivery changed. Alert delivery failures are logged and never fail the job.
+- **Ops-watch** (`ops-watch-scheduler.js`, PM2 app `ops-watch`, separate from `scheduler.js` and from
+  the Pitch Lab process so it can notice either dying). Every 30 min 08:00–20:30 ET Mon–Fri. Its
+  findings are NOT part of the sentinel snapshot, so they never touch Phase 0's `open_p0_p1` gate.
+  Start: `pm2 start ops-watch-scheduler.js --name ops-watch && pm2 save`. Manual:
+  `node jobs/ops-watch.js --dry-run` (reads only, sends nothing, writes nothing).
+  - Broker reader: PM2 online; heartbeat `pm:broker-reader:last-seen` fresh (<30 min — this is the
+    key the reader writes; the sentinel's `pm:companion:last-seen` is the Mac executor's);
+    `pm:broker-reader:read-health` (written by the dashboard repo's `scripts/mac-companion.mjs`)
+    with ≥3 consecutive failures for a read kind. If the error is a Claude CLI failure, run
+    `claude auth status` on the Jetson and log in (interactive — Sam does this).
+  - Pitch Lab (only when `PITCH_LAB_ENABLED=1`): PM2 online; by 19:30 ET a `pitchlab:run:daily:<date>`
+    marker exists and is not `no_catalog`/`budget_stop`/zero pitches; the daily digest marker
+    `pitchlab:telegram:daily:<date>` is a delivery timestamp (not `sending`); the last Saturday's
+    `pitchlab:telegram:weekly:<date>` exists. A partial run is P2 (logged, not paged).
+  - Sentinel liveness: `portfolio-manager` online and `pm:sysloop:last-run` is today by 20:30 ET.
+  - Not covered: Pitch Lab grading lag (needs Postgres; the daily digest reports grading errors),
+    and nothing watches ops-watch itself beyond PM2's auto-restart.
+
 ## Common failure modes and what they usually mean
 
 | Symptom | Usual meaning |
