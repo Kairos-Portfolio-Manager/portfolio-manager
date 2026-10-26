@@ -2,9 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import {
-  checkBrokerReader, checkPitchLab, checkSentinelLiveness, lastSaturday, summarizeReadError, READ_FAILURE_THRESHOLD, runOpsChecks,
+  checkBrokerReader, checkPitchLab, checkSentinelLiveness, lastSaturday, summarizeReadError, summarizeReadHistory, READ_FAILURE_THRESHOLD, runOpsChecks,
 } from "../lib/ops-watch/checks.js";
-import { runOpsWatch, OPS_STATE_KEY, etParts } from "../jobs/ops-watch.js";
+import { runOpsWatch, gatherInputs, OPS_STATE_KEY, etParts } from "../jobs/ops-watch.js";
 
 const NOW = Date.parse("2026-10-26T13:00:00Z");
 const online = (name, uptimeMs = 3600000) => ({ name, pm2_env: { status: "online", pm_uptime: NOW - uptimeMs } });
@@ -55,7 +55,7 @@ test("the heartbeat bug: reader online but heartbeat stale/missing is flagged, b
 test("fail closed: unreadable inputs are findings, not passes", () => {
   assert.match(titles(checkBrokerReader({ processes: null, heartbeatMs: NOW, readHealth: null, nowMs: NOW }))[0], /cannot read the PM2 process list/);
   assert.match(titles(checkBrokerReader({ processes: procs(), heartbeatMs: undefined, readHealth: null, nowMs: NOW })).join(), /heartbeat/);
-  assert.match(titles(checkBrokerReader({ processes: procs(), heartbeatMs: NOW, readHealth: undefined, nowMs: NOW })).join(), /read-health/);
+  assert.match(titles(checkBrokerReader({ processes: procs(), heartbeatMs: NOW, readHealth: undefined, nowMs: NOW })).join(), /receipt history/);
 });
 
 test("summarizeReadError keeps the human part only", () => {
@@ -131,16 +131,19 @@ function fakeRedis(initial = {}) {
   return {
     store,
     async get(k) { return store.get(k) ?? null; },
-    async hgetall(k) { return store.get(k) ?? null; },
+    async lrange(k) { return store.get(k) ?? []; },
     async set(k, v) { store.set(k, v); return "OK"; },
   };
 }
 
+const failed = (n, day = "2026-10-26", error = "Claude CLI failed (exit 1)") => Array.from({ length: n }, (_, i) => JSON.stringify({ outcome: "failed", ok: false, ts: `${day}T${String(13 + i).padStart(2, "0")}:30:00.000Z`, error }));
+const HIST = (kind, date) => `pm:job:${kind}:history:${date}`;
+
 test("end to end: a failing reader -> one Telegram, state persisted, no repeat on the next tick, resolved note on recovery", async () => {
   const redis = fakeRedis({
-    "pm:broker-reader:last-seen": new Date(Date.parse("2026-10-26T15:00:00Z") - 60000).toISOString(),
-    "pm:broker-reader:read-health": { "holdings-sync": JSON.stringify({ consecutiveFailures: 5, firstFailureAt: "2026-10-26T13:30:00Z", lastError: "Claude CLI failed (exit 1)" }) },
+    [HIST("holdings-sync", "2026-10-26")]: failed(5),
     "pm:sysloop:last-run": JSON.stringify({ date: "2026-10-26" }),
+    "pitchlab:telegram:weekly:2026-10-24": "2026-10-24T14:00:03.000Z",
   });
   const sent = [];
   const common = { redis, env: { PITCH_LAB_ENABLED: "0" }, log: { log() {}, error() {} }, send: async (m) => { sent.push(m); }, listProcesses: async () => procs() };
@@ -153,29 +156,45 @@ test("end to end: a failing reader -> one Telegram, state persisted, no repeat o
   assert.equal(first.status, "ok");
   assert.equal(sent.length, 1);
   assert.match(sent[0], /1 new urgent finding/);
-  assert.match(sent[0], /Broker reads failing: holdings-sync \(5 in a row/);
+  assert.match(sent[0], /Broker reads failing: holdings-sync \(5 in a row since 2026-10-26 13:30Z\)/);
+  assert.match(sent[0], /Claude CLI failed \(exit 1\)/);
   assert.ok(JSON.parse(redis.store.get(OPS_STATE_KEY)).open);
   assert.ok(redis.store.get("pm:opswatch:last-run"));
 
   await runOpsWatch({ ...common, now: at("2026-10-26T15:30:00Z") });
   assert.equal(sent.length, 1, "next tick, same day: quiet");
 
+  redis.store.set(HIST("holdings-sync", "2026-10-27"), failed(2, "2026-10-27")); // still failing the next morning
   await runOpsWatch({ ...common, now: at("2026-10-27T12:00:00Z") }); // 08:00 ET Tuesday: digest
   assert.equal(sent.length, 2);
   assert.match(sent[1], /1 still open/);
 
-  redis.store.set("pm:broker-reader:read-health", {});
+  redis.store.set(HIST("holdings-sync", "2026-10-27"), [...failed(2, "2026-10-27"), JSON.stringify({ outcome: "ok", ok: true, ts: "2026-10-27T13:31:00.000Z" })]);
   await runOpsWatch({ ...common, now: at("2026-10-27T12:30:00Z") });
   assert.equal(sent.length, 3);
   assert.match(sent[2], /resolved/);
 });
 
-test("end to end: Telegram failure is retried, not recorded as announced; weekends and a missing Redis do not throw", async () => {
+test("summarizeReadHistory: streak, first/last failure, last success; mismatch is not a failure; junk is ignored", () => {
+  const rows = [
+    { outcome: "ok", ts: "2026-10-25T20:00:00Z" },
+    { outcome: "failed", ts: "2026-10-26T13:30:00Z", error: "a" },
+    { outcome: "failed", ts: "2026-10-26T14:30:00Z", error: "b" },
+    null, "junk", { nope: true },
+  ];
+  assert.deepEqual(summarizeReadHistory(rows), { consecutiveFailures: 2, firstFailureAt: "2026-10-26T13:30:00Z", lastFailureAt: "2026-10-26T14:30:00Z", lastSuccessAt: "2026-10-25T20:00:00Z", lastError: "b" });
+  assert.equal(summarizeReadHistory([...rows, { outcome: "mismatch", ts: "2026-10-26T15:00:00Z" }]).consecutiveFailures, 0);
+  assert.equal(summarizeReadHistory(undefined).consecutiveFailures, 0);
+  assert.equal(summarizeReadHistory([{ outcome: "failed", ts: "t" }]).lastSuccessAt, null);
+});
+
+test("end to end: Telegram failure is retried, not recorded as announced; a weekend still runs; a missing Redis does not throw", async () => {
   const redis = fakeRedis({
-    "pm:broker-reader:last-seen": new Date(Date.parse("2026-10-26T15:00:00Z")).toISOString(),
-    "pm:broker-reader:read-health": { "order-reconciliation": JSON.stringify({ consecutiveFailures: 4, lastError: "x" }) },
+    [HIST("order-reconciliation", "2026-10-26")]: failed(4, "2026-10-26", "x"),
     "pm:sysloop:last-run": JSON.stringify({ date: "2026-10-26" }),
+    "pitchlab:telegram:weekly:2026-10-24": "2026-10-24T14:00:03.000Z",
   });
+  redis.store.set("pm:broker-reader:last-seen", new Date(Date.parse("2026-10-26T15:00:00Z")).toISOString());
   let fail = true;
   const sent = [];
   const common = { redis, env: {}, log: { log() {}, error() {} }, listProcesses: async () => procs(), send: async (m) => { if (fail) throw new Error("telegram down"); sent.push(m); } };
@@ -186,8 +205,24 @@ test("end to end: Telegram failure is retried, not recorded as announced; weeken
   await runOpsWatch({ ...common, now: new Date("2026-10-26T15:30:00Z") });
   assert.equal(sent.length, 1, "retried and delivered on the next tick");
 
-  assert.equal((await runOpsWatch({ ...common, now: new Date("2026-10-24T15:00:00Z") })).status, "weekend");
+  // Saturday: not skipped. A dead reader on a weekend must page now, not Monday.
+  const weekend = { ...common, listProcesses: async () => [online("pitch-lab"), online("portfolio-manager")], redis: fakeRedis() };
+  const result = await runOpsWatch({ ...weekend, now: new Date("2026-10-24T15:00:00Z") });
+  assert.equal(result.status, "ok");
+  assert.equal(sent.length, 2);
+  assert.match(sent[1], /Broker reader is not registered in PM2/);
+
   assert.equal((await runOpsWatch({ ...common, redis: null, now: new Date("2026-10-26T15:00:00Z") })).status, "no_redis");
+});
+
+test("Pitch Lab is watched when its PM2 process exists even if the flag is invisible to ops-watch", async () => {
+  const base = { redis: fakeRedis(), now: new Date("2026-10-27T00:30:00Z") };
+  const seen = await gatherInputs({ ...base, env: {}, listProcesses: async () => procs() });
+  assert.equal(seen.pitchLab.enabled, true, "process present -> watched");
+  const absent = await gatherInputs({ ...base, env: {}, listProcesses: async () => [online("portfolio-manager")] });
+  assert.equal(absent.pitchLab.enabled, false, "no flag and no process -> intentionally not running");
+  const flagged = await gatherInputs({ ...base, env: { PITCH_LAB_ENABLED: "1" }, listProcesses: async () => [online("portfolio-manager")] });
+  assert.equal(flagged.pitchLab.enabled, true, "flag set but process missing -> watched, so the missing process is reported");
 });
 
 test("etParts agrees with the clock it is given", () => {
@@ -205,6 +240,7 @@ test("scheduler.js stays out of it, and ops-watch keeps a narrow write surface",
     assert.ok(!forbidden.test(read(file).replace(/\/\*[\s\S]*?\*\//g, "")), `${file} reaches a production write path`);
   }
   const writes = [...read("jobs/ops-watch.js").matchAll(/redis\.set\(([A-Z_]+)/g)].map((m) => m[1]);
+  assert.ok(!/redis\.(del|hset|rpush|lpush|expire|eval)\(/.test(read("jobs/ops-watch.js")), "ops-watch only ever reads, except its two state keys");
   assert.deepEqual(writes.sort(), ["OPS_LAST_RUN_KEY", "OPS_STATE_KEY"]);
   assert.ok(OPS_STATE_KEY.startsWith("pm:opswatch:"));
 });

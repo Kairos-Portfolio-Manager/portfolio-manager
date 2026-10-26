@@ -132,3 +132,35 @@ test("sentinel delivery: success persists announced state; send failure persists
 test("the sentinel only ever writes inside its namespace", () => {
   assert.ok(ALERT_STATE_KEY.startsWith("pm:sysloop:"));
 });
+
+test("the regression (Codex blocker): findings hidden behind '...and N more' are NOT marked announced and are named next", () => {
+  const eleven = Array.from({ length: 11 }, (_, i) => p1(`f${String(i).padStart(2, "0")}`, `Finding ${String(i).padStart(2, "0")}`));
+  const first = planAlerts({ findings: eleven, now: t0, dateET: "2026-10-26", digest: false });
+  assert.match(first.text, /and 3 more/);
+  assert.equal(first.shownFingerprints.length, 8);
+  const announced = Object.values(first.stateIfSent.open).filter((e) => e.alertCount === 1).length;
+  assert.equal(announced, 8, "only the 8 actually shown are recorded as announced");
+  const second = planAlerts({ findings: eleven, state: first.stateIfSent, now: new Date(t0.getTime() + 1800000), dateET: "2026-10-26", digest: false });
+  assert.equal(second.freshFingerprints.length, 3, "the three that were hidden are announced next");
+  assert.ok(second.text.includes("3 new urgent findings"));
+  for (const fp of second.freshFingerprints) assert.ok(second.shownFingerprints.includes(fp));
+});
+
+test("digest hidden items keep the digest due; once everything has been named the day's digest is done", () => {
+  const twelve = Array.from({ length: 12 }, (_, i) => p1(`d${String(i).padStart(2, "0")}`, `Open ${String(i).padStart(2, "0")}`));
+  let state = { version: 1, lastDigestDate: null, open: Object.fromEntries(twelve.map((f) => [f.fingerprint, { firstSeenMs: t0.getTime() - 5 * DAY, lastAlertedMs: t0.getTime() - 2 * DAY, alertCount: 1, severity: "P1", title: f.title }])) };
+  const a = planAlerts({ findings: twelve, state, now: t0, dateET: "2026-10-26" });
+  assert.equal(a.shownFingerprints.length, 10);
+  assert.equal(a.stateIfSent.lastDigestDate, null, "digest not complete: still due");
+  const b = planAlerts({ findings: twelve, state: a.stateIfSent, now: new Date(t0.getTime() + 1800000), dateET: "2026-10-26" });
+  assert.equal(b.digestFingerprints.length, 2, "only the two not yet named today");
+  assert.equal(b.stateIfSent.lastDigestDate, "2026-10-26");
+  const c = planAlerts({ findings: twelve, state: b.stateIfSent, now: new Date(t0.getTime() + 3600000), dateET: "2026-10-26" });
+  assert.equal(c.text, null);
+});
+
+test("a single oversize finding never produces an empty or oversize message and stays pending", () => {
+  const huge = p1("h", "T".repeat(4000), "D".repeat(4000));
+  const plan = planAlerts({ findings: [huge], now: t0, dateET: "2026-10-26", digest: false });
+  assert.ok(!plan.text || plan.text.length <= 3500);
+});

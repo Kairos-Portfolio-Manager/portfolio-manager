@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { getRedis } from "../lib/redis.js";
 import { isTradingDate } from "../lib/market-calendar.js";
 import { planAlerts } from "../lib/alerting/policy.js";
-import { lastSaturday, runOpsChecks } from "../lib/ops-watch/checks.js";
+import { lastSaturday, runOpsChecks, summarizeReadHistory } from "../lib/ops-watch/checks.js";
 import { sendMessage } from "../lib/telegram.js";
 
 // Ops-watch: a small, separate PM2 process (ops-watch-scheduler.js) that watches the
@@ -18,13 +18,15 @@ import { sendMessage } from "../lib/telegram.js";
 // clock, and separate from the Pitch Lab process so it can notice that process dying.
 //
 // Write surface: pm:opswatch:* keys and Telegram. Reads only everywhere else.
+// Read-failure streaks come from the reader's existing receipt history (pm:job:<kind>:history:<date>).
 
 const pExecFile = promisify(execFile);
 
 export const OPS_STATE_KEY = "pm:opswatch:alert-state";
 export const OPS_LAST_RUN_KEY = "pm:opswatch:last-run";
 const READER_HEARTBEAT_KEY = "pm:broker-reader:last-seen";
-const READER_HEALTH_KEY = "pm:broker-reader:read-health";
+const READ_KINDS = ["holdings-sync", "order-reconciliation"]; // contracts/mcp-read-job.js MCP_READ_JOB_KINDS
+const historyKey = (kind, dateET) => `pm:job:${kind}:history:${dateET}`;
 const SENTINEL_LAST_RUN_KEY = "pm:sysloop:last-run";
 
 export function etParts(now = new Date()) {
@@ -74,9 +76,8 @@ export async function gatherInputs({ redis = getRedis(), now = new Date(), env =
   const processes = await listProcesses();
   const get = (key) => (redis ? readKey(redis, async () => (await redis.get(key)) ?? null) : undefined);
 
-  const [heartbeatRaw, healthRaw, sentinelRaw, dailyRaw, dailyDigest] = await Promise.all([
+  const [heartbeatRaw, sentinelRaw, dailyRaw, dailyDigest] = await Promise.all([
     get(READER_HEARTBEAT_KEY),
-    redis ? readKey(redis, async () => (await redis.hgetall(READER_HEALTH_KEY)) ?? null) : undefined,
     get(SENTINEL_LAST_RUN_KEY),
     get(`pitchlab:run:daily:${et.date}`),
     get(`pitchlab:telegram:daily:${et.date}`),
@@ -84,16 +85,24 @@ export async function gatherInputs({ redis = getRedis(), now = new Date(), env =
   const weeklyDigest = await get(`pitchlab:telegram:weekly:${lastSaturday(et.date)}`);
 
   const heartbeatMs = heartbeatRaw === undefined ? undefined : heartbeatRaw === null ? null : Date.parse(String(heartbeatRaw));
-  let readHealth = healthRaw;
-  if (readHealth && typeof readHealth === "object") {
-    readHealth = Object.fromEntries(Object.entries(readHealth).map(([kind, value]) => [kind, parseJson(value)]));
+
+  // Failure streak per read kind, from the reader's own per-attempt receipts (yesterday + today, oldest first).
+  const yesterday = etParts(new Date(nowMs - 24 * 3600 * 1000)).date;
+  let readHealth = {};
+  for (const kind of READ_KINDS) {
+    const days = await Promise.all([yesterday, et.date].map((date) => (redis ? readKey(redis, async () => (await redis.lrange(historyKey(kind, date), 0, -1)) ?? []) : undefined)));
+    if (days.some((day) => day === undefined)) { readHealth = undefined; break; }
+    readHealth[kind] = summarizeReadHistory(days.flat().map(parseJson));
   }
   const trading = isTradingDay(et);
 
   return {
     reader: { processes, heartbeatMs, readHealth, nowMs },
     pitchLab: {
-      enabled: env.PITCH_LAB_ENABLED?.trim() === "1",
+      // Watched when the flag says so OR the process exists in PM2: the flag lives in .env today
+      // and could move to the PM2 env of the pitch-lab app only; a watcher that silently stops
+      // watching because it cannot see the flag is the failure mode this exists to prevent.
+      enabled: env.PITCH_LAB_ENABLED?.trim() === "1" || Array.isArray(processes) && processes.some((p) => p?.name === "pitch-lab"),
       processes,
       nowET: et,
       isTradingDay: trading,
@@ -108,9 +117,8 @@ export async function gatherInputs({ redis = getRedis(), now = new Date(), env =
 
 export async function runOpsWatch({ dryRun = false, now = new Date(), redis = getRedis(), send = sendMessage, log = console, listProcesses = gatherPm2, env = process.env } = {}) {
   const et = etParts(now);
-  // Weekday-only: nothing here is time-critical on weekends. Holidays still run — a
-  // dead process on a holiday is still dead — but the date-specific checks self-skip.
-  if (["Sat", "Sun"].includes(et.weekday)) return { status: "weekend" };
+  // Runs every day: process-liveness findings and the daily digest must not wait for Monday.
+  // The date-specific checks (daily run, digest, sentinel) self-skip on non-trading days.
   if (!redis) {
     log.error("[OpsWatch] Redis NOT CONFIGURED — cannot read evidence or persist alert state; watcher is blind");
     return { status: "no_redis" };

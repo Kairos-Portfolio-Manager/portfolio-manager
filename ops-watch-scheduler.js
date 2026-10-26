@@ -8,7 +8,8 @@
  *
  * Start:  pm2 start ops-watch-scheduler.js --name ops-watch && pm2 save
  *
- * Schedule: every 30 minutes, 08:00-20:30 ET, Mon-Fri. The 08:00 run carries the
+ * Schedule: every 30 minutes, 08:00-20:30 ET, every day (weekends and holidays included: a dead process or
+ * an open finding must not wait for Monday; date-specific checks self-skip on non-trading days). The 08:00 run carries the
  * morning digest of anything still open; the 20:30 run is the last chance to notice a
  * missed 18:40 Pitch Lab cycle or a missed 20:10 sentinel.
  */
@@ -44,5 +45,5 @@ async function guarded() {
   }
 }
 
-cron.schedule("0,30 8-20 * * 1-5", guarded, TZ);
-console.log("[OpsWatchScheduler] started — every 30 min, 08:00-20:30 ET, Mon-Fri");
+cron.schedule("0,30 8-20 * * *", guarded, TZ);
+console.log("[OpsWatchScheduler] started — every 30 min, 08:00-20:30 ET, every day");
