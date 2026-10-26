@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { buildPitchLabSnapshot, isoWeekKey, EVIDENCE_BAR, SNAPSHOT_SCHEMA_VERSION } from "../lib/pitch-lab/dashboard-snapshot.js";
+import { isoWeekKey as analysisIsoWeekKey } from "../lib/pitch-lab/analysis.js";
 import { publishPitchLabSnapshot, PITCH_LAB_SNAPSHOT_KEY } from "../lib/pitch-lab-snapshot-publisher.js";
 import { refreshDashboardSnapshot } from "../jobs/pitch-lab-daily.js";
 
@@ -11,7 +12,7 @@ const pitch = (id, ticker, conviction, date, extra = {}) => ({
   id, ticker, conviction, pitchedAt: at(date),
   rationale: { thesis: `${ticker} thesis ${"x".repeat(60)}`, risks: [`${ticker} main risk`] }, ...extra,
 });
-const outcome = (pitchId, horizonDays, excessReturn, gradedAt = "2026-10-27T22:45:00.000Z") => ({ pitchId, horizonDays, excessReturn, gradedAt });
+const outcome = (pitchId, horizonDays, excessReturn, gradedAt = "2026-10-27T22:45:00.000Z", entryDate = "2026-10-20") => ({ pitchId, horizonDays, excessReturn, gradedAt, entryDate });
 
 test("an empty store yields a valid, honest snapshot (nothing invented)", () => {
   const s = buildPitchLabSnapshot({ pitches: [], outcomes: [], now: new Date("2026-10-26T12:00:00Z") });
@@ -51,7 +52,7 @@ test("scoreboard: beat-SPY counts, pending, independent weeks, and conviction bu
   ];
   const s = buildPitchLabSnapshot({
     pitches,
-    outcomes: [outcome("a", 5, 0.04), outcome("b", 5, -0.02), outcome("c", 5, 0.01), outcome("a", 10, 0.05)],
+    outcomes: [outcome("a", 5, 0.04), outcome("b", 5, -0.02), outcome("c", 5, 0.01, "2026-11-03T22:45:00.000Z", "2026-10-27"), outcome("a", 10, 0.05)],
   });
   const five = s.scoreboard["5"];
   assert.equal(five.graded, 3);
@@ -80,7 +81,7 @@ test("the run summary is attached only to the day it belongs to", () => {
   assert.deepEqual([same.latest.selected, same.latest.dropped, same.latest.shortfall], [15, 2, 1]);
   const other = buildPitchLabSnapshot({ pitches, outcomes: [], run: { date: "2026-10-22", status: "budget_stop", selected: 15, failedCount: 9 } });
   assert.equal(other.latest.selected, null);
-  assert.equal(other.latest.status, "ok");
+  assert.equal(other.latest.status, null, "no matching run summary -> unknown, never assumed clean");
 });
 
 test("repeated tickers and the conviction mix are reported", () => {
@@ -145,4 +146,34 @@ test("the snapshot path adds no new write surface beyond its one constant key", 
   assert.match(publisher, /client\.set\(PITCH_LAB_SNAPSHOT_KEY,/);
   // The bridge's own pinned write surface is untouched.
   assert.ok(!/SNAPSHOT/.test(read("lib/pitch-lab-peer-bridge.js")));
+});
+
+test("the regression (Codex): independent weeks follow the ENTRY date, exactly like the analysis - a Friday pitch and a Monday pitch can share a week", () => {
+  const pitches = [pitch("fri", "FFF", 3, "2026-10-23"), pitch("mon", "MMM", 3, "2026-10-26")];
+  // Friday 18:44 ET pitch enters Monday 26 Oct; the Monday pitch enters Tuesday 27 Oct: same ISO week.
+  const s = buildPitchLabSnapshot({ pitches, outcomes: [outcome("fri", 5, 0.01, undefined, "2026-10-26"), outcome("mon", 5, 0.02, undefined, "2026-10-27")] });
+  assert.equal(s.scoreboard["5"].independentWeeks, 1, "pitch dates are in two ISO weeks, but the entries share one");
+  const split = buildPitchLabSnapshot({ pitches, outcomes: [outcome("fri", 5, 0.01, undefined, "2026-10-23"), outcome("mon", 5, 0.02, undefined, "2026-10-27")] });
+  assert.equal(split.scoreboard["5"].independentWeeks, 2);
+  for (const d of ["2026-10-23", "2026-10-26", "2026-01-01", "2025-12-29", "2026-12-31"]) assert.equal(isoWeekKey(d), analysisIsoWeekKey(d), `same definition as analysis.js for ${d}`);
+});
+
+test("publisher is time-bounded: a Redis call that never settles cannot hold the cycle open, and the refresh stays non-fatal", async () => {
+  const hung = { set: () => new Promise(() => {}) };
+  const snapshot = buildPitchLabSnapshot({ pitches: [pitch("a", "AAA", 3, "2026-10-19")], outcomes: [] });
+  await assert.rejects(() => publishPitchLabSnapshot(snapshot, { redis: hung, timeoutMs: 30 }), /timed out/);
+  const errors = [];
+  const started = Date.now();
+  const ok = await refreshDashboardSnapshot({ pitches: [pitch("a", "AAA", 3, "2026-10-19")], outcomes: [], redis: hung, publish: (snap, opts) => publishPitchLabSnapshot(snap, { ...opts, timeoutMs: 30 }), log: { error: (m) => errors.push(m), log() {} } });
+  assert.equal(ok, false);
+  assert.ok(Date.now() - started < 1000);
+  assert.match(errors.at(-1), /non-fatal.*timed out/);
+});
+
+test("the weekly report no longer overwrites the daily snapshot (it would drop the latest run's status)", () => {
+  const src = readFileSync(new URL("../jobs/pitch-lab-daily.js", import.meta.url), "utf8");
+  const calls = [...src.matchAll(/await refreshDashboardSnapshot\(/g)].length;
+  assert.equal(calls, 1, "only the daily grade/digest path refreshes the snapshot");
+  const report = src.slice(src.indexOf("export async function runPitchLabReport"), src.indexOf("export async function runPitchLabDailyCycle"));
+  assert.ok(!/refreshDashboardSnapshot\(/.test(report.replace(/\/\/.*$/gm, "")));
 });

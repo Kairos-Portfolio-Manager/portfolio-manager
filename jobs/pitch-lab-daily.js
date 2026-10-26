@@ -299,7 +299,8 @@ export async function runPitchLabReport({ env = process.env, now = () => new Dat
     formatPitchLabWeeklyTelegram(report),
     { redis: cache, send },
   );
-  await refreshDashboardSnapshot({ pitches: pitchRows, outcomes: outcomeRows, redis: cache, now });
+  // Deliberately NOT refreshing the dashboard snapshot here: the daily cycle owns it (it knows the run
+  // summary); a weekly overwrite would drop the latest run's status and dropped/shortfall counts.
   console.log(`[PitchLab] report written (${report.totals.pitches} pitches); published=${published}`);
   return { status: "ok", pitches: report.totals.pitches, published };
 }
