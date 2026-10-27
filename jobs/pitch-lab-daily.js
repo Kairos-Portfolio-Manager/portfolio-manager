@@ -32,8 +32,10 @@ import { mandateVersionFor } from "../lib/research-version.js";
 import { sendMessage } from "../lib/telegram.js";
 import { fetchDailyBars } from "../lib/yahoo.js";
 import { gatherCandidateData, peersForPitch, publishPitchLabReport } from "../lib/pitch-lab-peer-bridge.js";
+import { publishPitchLabSnapshot } from "../lib/pitch-lab-snapshot-publisher.js";
 import { analyzePitchLab } from "../lib/pitch-lab/analysis.js";
 import { runDailyPitches } from "../lib/pitch-lab/daily-runner.js";
+import { buildPitchLabSnapshot } from "../lib/pitch-lab/dashboard-snapshot.js";
 import { gradeMaturedPitches } from "../lib/pitch-lab/grade-runner.js";
 import { renderReportHtml } from "../lib/pitch-lab/render-html.js";
 import { formatPitchLabDailyTelegram, formatPitchLabWeeklyTelegram } from "../lib/pitch-lab/telegram.js";
@@ -88,6 +90,23 @@ export async function sendTelegramOnce(key, message, { redis = getRedis(), send 
 }
 
 const dailyRunKey = (date) => `pitchlab:run:daily:${date}`;
+
+/**
+ * Refresh the website snapshot. Presentation only: a failure here is logged loudly but
+ * must never fail the daily cycle (the canonical evidence and the digest already succeeded).
+ */
+export async function refreshDashboardSnapshot({ pitches, outcomes, run = null, redis, now = () => new Date(), publish = publishPitchLabSnapshot, log = console } = {}) {
+  try {
+    const snapshot = buildPitchLabSnapshot({ pitches, outcomes, run, now: now() });
+    const published = await publish(snapshot, { redis, now });
+    if (!published) log.error("[PitchLab] dashboard snapshot was NOT published (Redis unavailable).");
+    return published;
+  } catch (error) {
+    log.error(`[PitchLab] dashboard snapshot failed (non-fatal): ${error?.message ?? error}`);
+    return false;
+  }
+}
+
 
 function phoneSafeRunSummary(result) {
   return {
@@ -259,6 +278,7 @@ export async function runPitchLabGrade({
     }),
     { redis: cache, send },
   );
+  await refreshDashboardSnapshot({ pitches, outcomes, run, redis: cache, now });
   return { status: gradingError ? "partial" : "ok", ...result, gradingFailed: Boolean(gradingError), telegram: "daily_digest" };
 }
 
@@ -266,7 +286,8 @@ export async function runPitchLabReport({ env = process.env, now = () => new Dat
   if (!pitchLabEnabled(env)) return { status: "disabled" };
   const dir = defaultPitchLabDir(env);
   const canonical = store ?? openPostgresPitchStore({ pool });
-  const report = analyzePitchLab({ pitches: await canonical.listPitches(), outcomes: await canonical.listOutcomes(), now: now() });
+  const [pitchRows, outcomeRows] = [await canonical.listPitches(), await canonical.listOutcomes()];
+  const report = analyzePitchLab({ pitches: pitchRows, outcomes: outcomeRows, now: now() });
   mkdirSync(dir, { recursive: true });
   writeFileSync(path.join(dir, "report.json"), `${JSON.stringify(report, null, 2)}\n`);
   writeFileSync(path.join(dir, "report.html"), renderReportHtml(report));
@@ -278,6 +299,8 @@ export async function runPitchLabReport({ env = process.env, now = () => new Dat
     formatPitchLabWeeklyTelegram(report),
     { redis: cache, send },
   );
+  // Deliberately NOT refreshing the dashboard snapshot here: the daily cycle owns it (it knows the run
+  // summary); a weekly overwrite would drop the latest run's status and dropped/shortfall counts.
   console.log(`[PitchLab] report written (${report.totals.pitches} pitches); published=${published}`);
   return { status: "ok", pitches: report.totals.pitches, published };
 }
