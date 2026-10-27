@@ -51,7 +51,8 @@
     "orders:reconcile": "node scripts/reconcile-orders.js",
     "orders:reconcile:jetson": "node jobs/order-reconciliation.js",
     "reconciliation:resolve-test": "node scripts/resolve-reconciliation-test-artifact.js",
-    "approval:close-legacy-test": "node scripts/close-legacy-test-approval.js"
+    "approval:close-legacy-test": "node scripts/close-legacy-test-approval.js",
+    "pitch-lab": "node scripts/pitch-lab.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

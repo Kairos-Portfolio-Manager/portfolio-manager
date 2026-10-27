@@ -13,6 +13,7 @@ import { validateResearchTickerRequest, buildLabOutcome } from "./lib/lab-resear
 import { fetchAthenaStatus } from "./lib/athena.js";
 import { writeAsyncJson } from "./lib/http-json.js";
 import { AGENTS } from "./config/agents.js";
+import { isResearchActive } from "./lib/research-run-health.js";
 import { withWorkflowLock } from "./lib/workflow-lock.js";
 import { shadowWriteCapitalEntry, shadowWriteProposal } from "./lib/pg/dual-write.js";
 import { getPortfolioManagerShadowState } from "./lib/portfolio-manager-shadow-store.js";
@@ -346,6 +347,11 @@ async function handleRequest(req, res) {
       return;
     }
     const { ticker, agentId } = validated;
+    if (!isResearchActive(AGENTS.find((a) => a.id === agentId))) {
+      res.writeHead(409);
+      res.end(JSON.stringify({ error: `${agentId} is frozen: research and new proposals are paused` }));
+      return;
+    }
     if (scanRunning) {
       res.writeHead(429);
       res.end(JSON.stringify({ error: "Full research scan is currently running — retry after it finishes" }));

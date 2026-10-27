@@ -1,0 +1,25 @@
+{
+  "ticker": "NET",
+  "agentId": "agent-1",
+  "pitchedAt": "2026-08-17T14:30:00Z",
+  "action": "BUY",
+  "conviction": 3,
+  "intendedHoldingDays": 10,
+  "entryReference": { "price": 100.0, "asOf": "2026-08-17T14:25:00Z" },
+  "rationale": {
+    "thesis": "EXAMPLE ONLY: revenue growth is holding up while the stock has lagged peers, leaving room for a re-rating.",
+    "reasons": [
+      { "claim": "Revenue growth remains well above the peer median.", "features": ["revGrowth"] },
+      { "claim": "Price has pulled back toward its 200-day average.", "features": ["priceVs200dma"] }
+    ],
+    "risks": ["Valuation is still high in absolute terms."],
+    "killCriteria": ["Revenue growth decelerates next quarter."]
+  },
+  "features": {
+    "revGrowth": { "value": 0.27, "asOf": "2026-08-07T00:00:00Z" },
+    "peerValuation": { "value": 180.0, "asOf": "2026-08-17T14:25:00Z" },
+    "priceVs200dma": { "value": 0.04, "asOf": "2026-08-17T14:25:00Z" }
+  },
+  "context": { "sector": "technology", "selection": "manual" },
+  "provenance": { "source": "manual", "mandateVersion": null, "promptVersion": null, "model": null }
+}

@@ -1,18 +1,65 @@
 import "dotenv/config";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { assembleSnapshot, persistSnapshot } from "../lib/sysloop/snapshot.js";
+import { assembleSnapshot, persistSnapshot, redisGuardSet } from "../lib/sysloop/snapshot.js";
+import { getRedis } from "../lib/redis.js";
+import { planAlerts } from "../lib/alerting/policy.js";
 import { sendMessage } from "../lib/telegram.js";
 
 // Tier 0 of the system autoresearch loop (docs/SYSTEM-LOOP-PLAN.md).
 // Deterministic only — no LLM calls ever happen on the Jetson. Observes the
-// system, publishes a snapshot to Redis for the Mac tier, and Telegrams only
-// P0s and P1s that were NOT present in the previous snapshot (dedup by
-// fingerprint, so a known-broken thing doesn't page Sam every evening).
+// system, publishes a snapshot to Redis for the Mac tier, and Telegrams P0/P1s
+// per lib/alerting/policy.js: new ones immediately, every still-open one in a
+// once-a-day digest with its age (so a known-broken thing is never silent for
+// more than a day), and a note when one resolves. A failed send is retried next
+// run instead of being recorded as announced.
 //
 // Write surface: pm:sysloop:* keys, ops/health/*.json, Telegram. Nothing else.
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+export const ALERT_STATE_KEY = "pm:sysloop:alert-state";
+
+// Alerting is this job's OUTPUT, but it must never become a reason the job
+// fails: the snapshot feeds the Phase 0 observer. Every failure here is loud in
+// the logs and non-fatal.
+export async function deliverSentinelAlerts({ snapshot, prevAnomalyFingerprints, redis = getRedis(), send = sendMessage, now = new Date(), log = console }) {
+  let state = null;
+  try {
+    state = redis ? await redis.get(ALERT_STATE_KEY) : null;
+  } catch (e) {
+    log.error(`[Sysloop] alert state unreadable (${e.message}); treating as empty`);
+  }
+  const plan = planAlerts({
+    findings: snapshot.anomalies,
+    state,
+    now,
+    dateET: snapshot.date,
+    legacyKnown: prevAnomalyFingerprints,
+    label: "System sentinel",
+  });
+  let sent = false;
+  if (plan.text) {
+    try {
+      await send(plan.text);
+      sent = true;
+    } catch (e) {
+      // Not recorded as announced, so the next run retries.
+      log.error("[Sysloop] TELEGRAM ALERT FAILED — urgent findings unreported, will retry next run:", e.message);
+    }
+  }
+  if (!redis) {
+    log.error("[Sysloop] Redis NOT CONFIGURED — alert state not persisted; every urgent finding will re-announce next run");
+    return { plan, sent, persisted: false };
+  }
+  try {
+    await redisGuardSet(redis, ALERT_STATE_KEY, !plan.text || sent ? plan.stateIfSent : plan.stateIfNotSent);
+    return { plan, sent, persisted: true };
+  } catch (e) {
+    log.error(`[Sysloop] alert state NOT persisted (${e.message}); findings may re-announce next run`);
+    return { plan, sent, persisted: false };
+  }
+}
 
 export function assertSentinelPublished(published) {
   if (published !== true) throw new Error("System sentinel snapshot was not durably published; refusing a false-green scheduled run.");
@@ -35,15 +82,12 @@ export async function runSystemSentinel({ dryRun = false } = {}) {
   );
   for (const a of snapshot.anomalies) console.log(`[Sysloop]   ${a.severity} ${a.check}: ${a.title}`);
 
-  if (urgent.length > 0 && !dryRun) {
-    const lines = urgent.slice(0, 8).map((a) => `${a.severity} ${a.title}`).join("\n");
-    try {
-      await sendMessage(`System sentinel: ${urgent.length} new urgent finding(s)\n${lines}`);
-    } catch (e) {
-      // Alerting is this job's OUTPUT — a swallowed Telegram failure would make
-      // the sentinel itself a silent no-op. Scream in the logs at minimum.
-      console.error("[Sysloop] TELEGRAM ALERT FAILED — urgent findings unreported:", e.message);
-    }
+  if (!dryRun) {
+    const outcome = await deliverSentinelAlerts({ snapshot, prevAnomalyFingerprints });
+    console.log(
+      `[Sysloop] alerts: ${outcome.plan.freshFingerprints.length} new, ${outcome.plan.digestFingerprints.length} in digest, ` +
+      `${outcome.plan.clearedTitles.length} resolved, sent=${outcome.sent}, statePersisted=${outcome.persisted}`
+    );
   }
 
   const published = dryRun ? false : await persistSnapshot({

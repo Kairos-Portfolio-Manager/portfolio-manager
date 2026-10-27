@@ -77,7 +77,7 @@ import {
   readPerformanceHistory,
 } from "../lib/sheets.js";
 import { AGENTS } from "../config/agents.js";
-import { canCreateActionableProposal, classifyResearchFailure, finiteNonNegative, needsImmediateResearchFailureAlert } from "../lib/research-run-health.js";
+import { canCreateActionableProposal, classifyResearchFailure, isResearchActive, finiteNonNegative, needsImmediateResearchFailureAlert } from "../lib/research-run-health.js";
 import {
   RESEARCH_OUTCOME_VERSION,
   addOutcome,
@@ -98,7 +98,7 @@ import { applyPersistedMandateScoreGate } from "../lib/mandate-proposal-gate.js"
 import { createScheduledPeerFundamentalProposalCanary, peerFundamentalScreenPolicy } from "../lib/peer-fundamental-proposal-canary.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DEFAULT_AGENT_IDS = AGENTS.map((agent) => agent.id);
+const DEFAULT_AGENT_IDS = AGENTS.filter(isResearchActive).map((agent) => agent.id);
 
 // The private slate is an advisory baseline for the shadow selector. It must
 // describe the candidates actually sent through the live model loop, not the
@@ -1996,7 +1996,14 @@ async function runResearchScanUnlocked({ agentIds = DEFAULT_AGENT_IDS, source = 
     const breaker = await resolveCircuitBreaker(sheets, spreadsheetId);
     const boundaryToken = makeBoundaryToken();
     const monthlyBudget = createAnthropicMonthlyBudget();
-    const activeAgents = AGENTS.filter((a) => agentIds.includes(a.id));
+    // Frozen agents are excluded even when named explicitly (CLI diagnostics),
+    // so a freeze cannot be bypassed by a targeted run.
+    const requestedAgents = AGENTS.filter((a) => agentIds.includes(a.id));
+    for (const agent of requestedAgents.filter((a) => !isResearchActive(a))) {
+      console.warn(`[Research] ${agent.id} is frozen (researchStatus=${agent.researchStatus}) — skipped; no research or proposals this run.`);
+    }
+    const activeAgents = requestedAgents.filter(isResearchActive);
+    if (!activeAgents.length) throw new Error("No research-active agents to scan; all requested agents are frozen or unknown.");
     const catalog = await getUniverseCatalog();
     let candidateBus = null;
     if (catalog && Object.keys(catalog).length) {
@@ -2019,7 +2026,9 @@ async function runResearchScanUnlocked({ agentIds = DEFAULT_AGENT_IDS, source = 
 
     const totalRunMaxUsd = Number(process.env.RESEARCH_RUN_MAX_USD);
     const fairCaps = allocateFairAgentRunCaps(
-      activeAgents.map((agent) => agent.id),
+      // Partition over every registered agent, not just active ones, so a
+      // freeze cuts spend instead of handing the frozen share to agent-1.
+      AGENTS.map((agent) => agent.id),
       Number.isFinite(totalRunMaxUsd) && totalRunMaxUsd > 0 ? totalRunMaxUsd : 3
     );
     const agentBudgets = new Map(
@@ -2114,6 +2123,7 @@ export async function runResearchScan(options) {
 async function researchTickerForAgentUnlocked(agentId, ticker) {
   const agent = AGENTS.find((a) => a.id === agentId);
   if (!agent) throw new Error(`Unknown agentId: ${agentId}`);
+  if (!isResearchActive(agent)) throw new Error(`${agent.id} is frozen: research and new proposals are paused.`);
   const symbol = String(ticker ?? "").trim().toUpperCase();
   if (!symbol) throw new Error("ticker is required");
 

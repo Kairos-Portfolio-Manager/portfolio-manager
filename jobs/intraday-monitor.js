@@ -34,6 +34,8 @@ import {
 import { sendMessage as sendTelegram } from "../lib/telegram.js";
 import { withWorkflowLock } from "../lib/workflow-lock.js";
 import { researchTickerForAgent } from "./research-scan.js";
+import { AGENTS } from "../config/agents.js";
+import { isResearchActive } from "../lib/research-run-health.js";
 import {
   getServiceAccountClients,
   resolveSharedSpreadsheetId,
@@ -113,6 +115,12 @@ async function runIntradayMonitorUnlocked({ context = "intraday" } = {}) {
     );
 
     const agentLabel = alert.agentId ? `Agent ${alert.agentId.split("-")[1]}` : "Agent";
+    // A frozen agent's alert stays stored (not consumed) so it resumes on unfreeze.
+    const alertAgent = AGENTS.find((agent) => agent.id === alert.agentId);
+    if (alertAgent && !isResearchActive(alertAgent)) {
+      console.log(`[Intraday] ${alert.ticker}: alert owned by frozen ${alert.agentId} — not researched; alert kept.`);
+      continue;
+    }
     try {
       const result = await researchTickerForAgent(alert.agentId, alert.ticker);
       const finalAction = result.rec?.action ?? result.recommendation?.action ?? "NO_TRADE";

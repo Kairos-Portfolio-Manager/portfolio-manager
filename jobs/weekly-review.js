@@ -80,21 +80,38 @@ export async function generateLessons(scorecard, existingLessons, { monthlyBudge
   return parseWeeklyLessons(text);
 }
 
-export async function runWeeklyReview({ now = Date.now(), monthlyBudget = null, anthropicClient = anthropic } = {}) {
+export async function runWeeklyReview({
+  now = Date.now(),
+  monthlyBudget = null,
+  anthropicClient = anthropic,
+  env = process.env,
+  agents = AGENTS,
+  getClients = getServiceAccountClients,
+  resolveSpreadsheet = resolveSharedSpreadsheetId,
+  readOutcomes = readAgentRecommendationOutcomes,
+  listProposals = listAllProposals,
+  getArtifact = getWeeklyReviewArtifact,
+  setArtifact = setWeeklyReviewArtifact,
+  listMemories = listAgentMemories,
+  applyLessons = applyWeeklyLessons,
+  generate = generateLessons,
+  send = sendTelegram,
+} = {}) {
   const spendBudget = monthlyBudget ?? createAnthropicMonthlyBudget({ now: () => new Date(now) });
-  const { sheets, drive } = getServiceAccountClients();
-  const spreadsheetId = await resolveSharedSpreadsheetId(sheets, drive);
-  const proposals = await listAllProposals();
+  const { sheets, drive } = getClients();
+  const spreadsheetId = await resolveSpreadsheet(sheets, drive);
+  const proposals = await listProposals();
   const isoWeek = isoWeekOf(new Date(now));
   const previousIsoWeek = isoWeekOf(new Date(now - 7 * 24 * 60 * 60 * 1000));
-  const previousArtifact = await getWeeklyReviewArtifact(previousIsoWeek);
+  const previousArtifact = await getArtifact(previousIsoWeek);
 
   const summaryLines = [`📊 Weekly review — ${isoWeek}`];
   const artifact = { isoWeek, agents: {}, generatedAt: new Date(now).toISOString() };
+  const failures = [];
 
-  for (const agent of AGENTS) {
+  for (const agent of agents.filter((candidate) => candidate.researchStatus === "active")) {
     try {
-      const outcomes = await readAgentRecommendationOutcomes(sheets, spreadsheetId, agent.id);
+      const outcomes = await readOutcomes(sheets, spreadsheetId, agent.id);
       const scorecard = computeWeeklyScorecard({ agentId: agent.id, proposals, outcomes, now });
       scorecard.evaluatorHealth = classifyEvaluatorHealth(
         scorecard.weekActivity,
@@ -107,10 +124,10 @@ export async function runWeeklyReview({ now = Date.now(), monthlyBudget = null, 
         scorecard.weekActivity.scanned > 0 ||
         Object.values(scorecard.trackRecord).some((t) => t.matured > 0);
       if (hasSignal) {
-        const existingWeekly = (await listAgentMemories(agent.id, 100)).filter((m) => m.source === "weekly_review");
-        lessonResult = await generateLessons(scorecard, existingWeekly, { monthlyBudget: spendBudget, anthropicClient });
+        const existingWeekly = (await listMemories(agent.id, 100)).filter((m) => m.source === "weekly_review");
+        lessonResult = await generate(scorecard, existingWeekly, { monthlyBudget: spendBudget, anthropicClient });
         if (lessonResult.lessons.length || lessonResult.retire.length) {
-          await applyWeeklyLessons(agent.id, lessonResult, new Date(now).toISOString());
+          await applyLessons(agent.id, lessonResult, new Date(now).toISOString());
         }
       } else {
         lessonResult.skipped = true;
@@ -133,17 +150,28 @@ export async function runWeeklyReview({ now = Date.now(), monthlyBudget = null, 
       console.error(`[WeeklyReview] ${agent.id} failed:`, err.message);
       summaryLines.push(`${agent.id}: REVIEW FAILED — ${err.message}`);
       artifact.agents[agent.id] = { error: err.message };
+      failures.push({ agentId: agent.id, message: err.message });
     }
   }
 
-  await setWeeklyReviewArtifact(isoWeek, artifact);
+  await setArtifact(isoWeek, artifact);
   const summary = summaryLines.join("\n");
   console.log(`[WeeklyReview] ${summary}`);
-  try {
-    await sendTelegram(summary);
-  } catch (err) {
-    // The weekly summary is this job's OUTPUT — losing it silently is the historic failure mode.
-    console.error("[WeeklyReview] Telegram send failed:", err.message);
+  if (failures.length) {
+    try {
+      const names = failures.map((failure) => failure.agentId).join(", ");
+      await send(`🚨 Weekly learning review failed for ${names}: ${failures.map((failure) => failure.message).join("; ")}`);
+    } catch (err) {
+      console.error("[WeeklyReview] Telegram send failed:", err.message);
+    }
+  } else if (env.PITCH_LAB_ENABLED?.trim() !== "1") {
+    // Keep the existing Agent 1 learning summary on phones until Pitch Lab's
+    // weekly report is actually live; once enabled, that digest owns the slot.
+    try {
+      await send(summary);
+    } catch (err) {
+      console.error("[WeeklyReview] Telegram send failed:", err.message);
+    }
   }
   return artifact;
 }
