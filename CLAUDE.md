@@ -25,7 +25,9 @@ AI portfolio research + execution backend. **Real money flows through this repo.
 ## Deploy
 
 Deploy only the exact reviewed release branch/commit named in
-`docs/roadmaps/portfolio-master-plan.md` (currently `mandate-v3`; do not assume `main`) →
+`docs/roadmaps/portfolio-master-plan.md` (`main` is the release branch per ADR-0006; until the
+Jetson cutover is recorded there, the Jetson still runs `mandate-v3`, so state the branch and exact
+commit before and verify them after) →
 `ssh sam@100.102.93.103`, fast-forward that branch, install dependencies/apply
 reviewed migrations when required, then
 `npm run deploy:restart`. That fail-closed helper observes exactly one PM2
