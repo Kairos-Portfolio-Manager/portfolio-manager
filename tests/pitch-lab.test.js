@@ -546,8 +546,10 @@ test("only the bridge touches the database; Pitch Lab and its CLI never import i
   const bridge = readFileSync(new URL("../lib/pitch-lab-peer-bridge.js", import.meta.url), "utf8");
   const redisNames = [...bridge.matchAll(/\b(getPeerMetrics|requestPeerCoverage|set[A-Z]\w*|append\w*|delete\w*)\b/g)].map((m) => m[1]);
   assert.deepEqual([...new Set(redisNames)].sort(), ["getPeerMetrics", "requestPeerCoverage"], "the bridge may only read the peer table and file coverage requests");
-  assert.equal((bridge.match(/\.set\(/g) ?? []).length, 1, "besides the request queue, the bridge may write exactly one namespaced report key");
+  assert.equal((bridge.match(/\.set\(/g) ?? []).length, 2, "besides the request queue, the bridge may write exactly two namespaced keys: the report and the mandate review");
   assert.match(bridge, /client\.set\(PITCH_LAB_REPORT_KEY,/);
+  assert.match(bridge, /client\.set\(PITCH_LAB_MANDATE_REVIEW_KEY,/);
+  assert.match(bridge, /PITCH_LAB_MANDATE_REVIEW_KEY = "pitchlab:/, "the mandate review key must stay under the pitchlab: namespace");
 });
 
 test("pitch lab never imports production write paths", async () => {
