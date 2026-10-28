@@ -77,9 +77,10 @@ Work is gate-sequenced, not strictly code-sequenced: production remains in Phase
 
 Finish the existing 0A/0B/0C work: fail-closed research and fill attribution, signed ledger reads, truthful degraded-run status, Jetson-owned monitoring/reconciliation, live companion health, budget governance, and a unified manager surface.
 
-**Current release policy:** `mandate-v3` is the reviewed production line during
-the evidence-spine transition. Its controlled promotion to `main` is governed
-by [ADR-0005](adr/0005-production-branch-policy.md); every deploy must prove
+**Current release policy:** `main` is the release branch
+([ADR-0006](adr/0006-main-is-the-release-branch.md), superseding
+[ADR-0005](adr/0005-production-branch-policy.md)); the Jetson cutover from
+`mandate-v3` is pending. Every deploy must prove
 the exact branch and commit, and no branch policy changes execution authority.
 
 **Exit gate:** five consecutive trading days after deployment with no missed critical job, ambiguous fill, manual ledger repair, hidden failure, or unsafe client exposure; at least three genuine actionable proposals and one evaluator approval; every holding monitored despite quote failures; health, dashboard, logs, and reconciliation agree. Five days establish supervised workflow readiness, not investment-performance proof or new trading authority.

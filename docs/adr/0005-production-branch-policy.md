@@ -1,6 +1,6 @@
 # ADR-0005 — Production branch and revision policy
 
-**Status:** Accepted for the current transition
+**Status:** Superseded by [ADR-0006](0006-main-is-the-release-branch.md) (2026-10-28)
 
 ## Decision
 
