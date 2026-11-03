@@ -333,14 +333,17 @@ export async function runPitchLabMandateReview({ env = process.env, now = () => 
     throw error;
   }
 
-  // Persist to Postgres (append-only; duplicate content-hash is silently accepted).
+  // Persist to Postgres (append-only; a rerun on identical data maps to the same id).
+  // On a duplicate, publish and announce the stored review, not the new copy.
   let stored = false;
   try {
-    await canonical.appendMandateReview(review);
+    review = await canonical.appendMandateReview(review);
     stored = true;
   } catch (error) {
     if (error?.code === "mandate_review_already_recorded") {
       stored = true;
+      const existing = (await canonical.listMandateReviews({ agentId: review.agentId })).find((row) => row.id === error.reviewId);
+      if (existing) review = existing;
       console.log(`[PitchLab] Mandate Review already stored for this content; skipping duplicate write.`);
     } else {
       console.error(`[PitchLab] Mandate Review Postgres write failed: ${error.message}`);
@@ -358,7 +361,7 @@ export async function runPitchLabMandateReview({ env = process.env, now = () => 
   }
 
   await sendTelegramOnce(
-    `pitchlab:telegram:mandate-review:${etDateString(now())}`,
+    `pitchlab:telegram:mandate-review:${review.id ?? review.period}`,
     formatMandateReviewTelegram(review),
     { redis: cache, send },
   );
