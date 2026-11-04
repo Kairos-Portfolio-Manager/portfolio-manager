@@ -57,6 +57,47 @@ for those) — just things to come back to.
       document were redundant and were NOT used. Only the definitions above are new.
       This changed scoring, so per the master plan's reset rules it opens a new
       research cohort.
+- [ ] **MANDATE REVIEW: LET CONVICTION PERFORMANCE VS SPY INFORM THE SUGGESTIONS.**
+      Part of the planned monthly Mandate Review (Pitch Lab report -> suggested mandate
+      changes; suggestions only, never auto-applied). Conviction is the 1-5 rating Agent 1
+      gives each paper pitch; the review should test whether it earns its keep and feed
+      that into what it recommends. Inputs already exist in `report.json`
+      (`lib/pitch-lab/analysis.js`): per period x horizon (5/10/20 days) the conviction
+      block has Spearman rho + CI, excess return per conviction point (SE, CI, p),
+      and per-level `buckets` (n, mean/median excess return vs SPY, hit rate + CI).
+      Excess return = net stock return (10 bps/side) minus SPY over the same sessions.
+      Ideas to work out:
+      1. **Is conviction informative?** Calibration check: do higher levels beat SPY by
+         more? Require rho and the per-point regression CI (cluster-robust) to both
+         exclude zero before saying "positive"; a negative result is a real finding
+         (higher conviction did worse).
+      2. **Monotonicity by level.** Read the 1-5 buckets side by side: a 5 that does
+         worse than a 3 is a red flag even if the overall slope is positive. Flag
+         non-monotone patterns and sparse levels (e.g. n < 10 -> "not enough to judge").
+      3. **What it changes in the review (suggestions only).** If conviction is
+         predictive: suggest the mandate size/act more on the top levels, and
+         identify the lowest level that still beats SPY as a candidate minimum
+         threshold for acting on a pitch. If it's flat or negative: recommend
+         NOT using conviction for sizing/gating yet and say what it would take
+         (more pitches/weeks) to conclude anything. Also surface whether the 9
+         metrics already explain conviction (the multivariate "does conviction add
+         anything beyond the metrics" step in docs/PITCH-LAB.md Next steps #4);
+         if not tested, say that conviction's apparent edge may be just the metrics.
+      4. **Guardrails, same as the rest of the review.** Use the existing minimums
+         (>= 30 graded pitches, >= 8 independent weeks, else "insufficient_data");
+         call a conviction level "recommended" only if the pattern holds across
+         >= 2 periods or horizons, otherwise "watch"; no multiple-testing shortcut
+         (levels x horizons is a lot of looks - report q-values or treat per-level
+         results as descriptive); caveats: SPY-only benchmark (a sector rally can
+         inflate a level), overlapping holding periods, paper evidence != TRUST
+         execution evidence (master plan section 10).
+      5. **Implementation.** A pure function in the planned mandate-review module with
+         tests (fixtures: planted positive, flat, negative, non-monotone, and
+         sparse-level reports); fail closed (`unavailable`) on missing/malformed
+         conviction fields; show a conviction section on the website page (bucket table
+         + verdict) and in the Telegram summary. Must not import or write the mandate
+         config, proposals, ledgers or any order path.
+
 - [ ] **Revisit holdings reassessment cadence.** Come back to how often each
       agent's held positions get reassessed (daily exit-monitor at 16:45 ET,
       plus intraday ATR checks for Agent 1) and whether that cadence is still
