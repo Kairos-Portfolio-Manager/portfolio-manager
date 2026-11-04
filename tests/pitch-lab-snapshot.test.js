@@ -60,10 +60,12 @@ test("scoreboard: beat-SPY counts, pending, independent weeks, and conviction bu
   assert.equal(five.beat, 2);
   assert.equal(five.hitRate, 0.6667);
   assert.equal(five.independentWeeks, 2);
-  assert.deepEqual(five.convictionBuckets, [
+  // These fixtures carry no convictionScale, i.e. older 1-5 pitches: counted on their own scale only.
+  assert.deepEqual(five.legacyConvictionBuckets, [
     { conviction: 3, n: 1, meanExcess: 0.01, hitRate: 1 },
     { conviction: 5, n: 2, meanExcess: 0.01, hitRate: 0.5 },
   ]);
+  assert.deepEqual(five.convictionBuckets, []);
   assert.equal(s.scoreboard["10"].graded, 1);
   assert.equal(s.scoreboard["20"].graded, 0);
 });
@@ -71,8 +73,8 @@ test("scoreboard: beat-SPY counts, pending, independent weeks, and conviction bu
 test("outcomes with non-finite returns or for unknown pitches never count as graded", () => {
   const s = buildPitchLabSnapshot({ pitches: [pitch("a", "AAA", 4, "2026-10-19")], outcomes: [outcome("a", 5, NaN), outcome("ghost", 5, 0.5), outcome("a", 5, null), outcome("a", 5, 0.02)] });
   assert.equal(s.scoreboard["5"].graded, 1);
-  assert.equal(s.scoreboard["5"].convictionBuckets.length, 1);
-  assert.equal(s.scoreboard["5"].convictionBuckets[0].n, 1);
+  assert.equal(s.scoreboard["5"].legacyConvictionBuckets.length, 1);
+  assert.equal(s.scoreboard["5"].legacyConvictionBuckets[0].n, 1);
 });
 
 test("the run summary is attached only to the day it belongs to", () => {
@@ -87,7 +89,50 @@ test("the run summary is attached only to the day it belongs to", () => {
 test("repeated tickers and the conviction mix are reported", () => {
   const s = buildPitchLabSnapshot({ pitches: [pitch("a", "AAA", 3, "2026-10-19"), pitch("b", "AAA", 3, "2026-10-20"), pitch("c", "BBB", 4, "2026-10-20")], outcomes: [] });
   assert.deepEqual(s.program.repeatedTickers, [{ ticker: "AAA", days: 2 }]);
-  assert.deepEqual(s.program.convictionMix, { 1: 0, 2: 0, 3: 2, 4: 1, 5: 0 });
+  assert.deepEqual(s.program.legacyConvictionMix, { 1: 0, 2: 0, 3: 2, 4: 1, 5: 0 });
+  assert.deepEqual(s.program.convictionMix, { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0, 8: 0, 9: 0, 10: 0 });
+});
+
+const ranked = (percentile) => ({ status: "ranked", percentile, peerCount: 12 });
+const v3 = (id, ticker, conviction, date, ranks = {}) => pitch(id, ticker, conviction, date, { convictionScale: 10, peers: { ranks } });
+
+test("1-10 pitches fill their own buckets and mix; scales are never averaged together", () => {
+  const pitches = [v3("a", "AAA", 8, "2026-11-02"), v3("b", "BBB", 6, "2026-11-02"), pitch("c", "CCC", 5, "2026-11-02")];
+  const s = buildPitchLabSnapshot({ pitches, outcomes: [outcome("a", 5, 0.03, undefined, "2026-11-03"), outcome("c", 5, -0.01, undefined, "2026-11-03")] });
+  assert.equal(s.convictionScale, 10);
+  assert.equal(s.program.convictionMix[8], 1);
+  assert.equal(s.program.convictionMix[6], 1);
+  assert.equal(s.program.legacyConvictionMix[5], 1);
+  assert.deepEqual(s.scoreboard["5"].convictionBuckets, [{ conviction: 8, n: 1, meanExcess: 0.03, hitRate: 1 }]);
+  assert.deepEqual(s.scoreboard["5"].legacyConvictionBuckets, [{ conviction: 5, n: 1, meanExcess: -0.01, hitRate: 0 }]);
+  assert.equal(s.days.at(-1).avgConviction, 7, "the 5/5 pitch is not averaged in with 8/10 and 6/10");
+});
+
+test("every shown pitch carries its Mandate Score breakdown; recent pitches carry graded results", () => {
+  const pitches = [
+    v3("a", "AAA", 8, "2026-11-02", { revGrowth: ranked(0.95), epsTrajectory: ranked(0.2) }),
+    v3("b", "BBB", 6, "2026-11-02"),
+  ];
+  const s = buildPitchLabSnapshot({ pitches, outcomes: [outcome("a", 5, 0.03, undefined, "2026-11-03")] });
+  const [top, unscored] = s.latest.pitches;
+  assert.equal(top.ticker, "AAA", "scored pitches sort ahead, highest Mandate Score first");
+  assert.equal(top.mandateScore.score, 4.5); // 1.5 earned of 3.3 scorable
+  assert.equal(top.mandateScore.metricsScored, 2);
+  assert.equal(top.mandateScore.source, "derived");
+  assert.equal(top.mandateScore.metrics.find((m) => m.id === "revGrowth").band, "top 10%");
+  assert.equal(top.mandateScore.metrics.find((m) => m.id === "revGrowth").label, "Revenue growth (YoY)");
+  assert.deepEqual(top.mandateScore.categories.map((c) => c.id), ["A", "B", "C", "D"]);
+  assert.equal(unscored.mandateScore.score, null);
+  assert.equal(unscored.mandateScore.status, "unavailable");
+  const recentA = s.recent.find((r) => r.ticker === "AAA");
+  assert.deepEqual(recentA.excessReturn, { 5: 0.03, 10: null, 20: null });
+  assert.equal(recentA.mandateScore, 4.5);
+  assert.equal(s.program.avgMandateScore, 4.5, "unscored pitches are left out of the average, not counted as 0");
+});
+
+test("the snapshot tells the website when the next weekly report and Mandate Review run", () => {
+  const s = buildPitchLabSnapshot({ pitches: [], outcomes: [], now: new Date("2026-11-04T15:00:00Z") });
+  assert.deepEqual(s.schedule, { nextWeeklyReportAt: "2026-11-07T15:00:00.000Z", nextMandateReviewAt: "2026-11-07T16:00:00.000Z" });
 });
 
 test("malformed pitches are ignored, never thrown on", () => {
@@ -103,9 +148,12 @@ test("isoWeekKey groups Mon-Sun together and crosses year boundaries correctly",
 });
 
 test("snapshot is small enough to read on every page view", () => {
-  const many = Array.from({ length: 15 * 30 }, (_, i) => pitch(`p${i}`, `T${i % 60}`, (i % 5) + 1, `2026-${i % 2 ? "09" : "10"}-${String((i % 27) + 1).padStart(2, "0")}`));
+  // A full latest day (15 pitches, each with a 9-metric breakdown) plus the recent list.
+  const ranks = { revGrowth: ranked(0.9), epsTrajectory: ranked(0.7), marginTrend: ranked(0.6), peerValuation: ranked(0.4), balanceSheet: ranked(0.8) };
+  const many = Array.from({ length: 15 * 30 }, (_, i) => v3(`p${i}`, `T${i % 60}`, (i % 10) + 1, i < 15 ? "2026-10-30" : `2026-${i % 2 ? "09" : "10"}-${String((i % 27) + 1).padStart(2, "0")}`, ranks));
   const s = buildPitchLabSnapshot({ pitches: many, outcomes: many.map((p, i) => outcome(p.id, 5, (i % 7 - 3) / 100)) });
-  assert.ok(JSON.stringify(s).length < 40_000, `snapshot is ${JSON.stringify(s).length} bytes`);
+  assert.equal(s.latest.pitches.length, 15);
+  assert.ok(JSON.stringify(s).length < 80_000, `snapshot is ${JSON.stringify(s).length} bytes`);
 });
 
 test("publisher writes exactly one constant namespaced key and validates its input", async () => {
@@ -119,7 +167,7 @@ test("publisher writes exactly one constant namespaced key and validates its inp
   const stored = JSON.parse(writes[0][1]);
   assert.equal(stored.publishedAt, "2026-10-26T00:00:00.000Z");
   assert.equal(stored.snapshot.schemaVersion, SNAPSHOT_SCHEMA_VERSION);
-  await assert.rejects(() => publishPitchLabSnapshot({ schemaVersion: "other" }, { redis }), /pitch-lab.snapshot.v1/);
+  await assert.rejects(() => publishPitchLabSnapshot({ schemaVersion: "other" }, { redis }), /pitch-lab.snapshot.v2/);
   await assert.rejects(() => publishPitchLabSnapshot(null, { redis }), /requires/);
 });
 

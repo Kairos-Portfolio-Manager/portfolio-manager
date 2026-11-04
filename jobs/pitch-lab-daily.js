@@ -33,6 +33,7 @@ import { sendMessage } from "../lib/telegram.js";
 import { fetchDailyBars } from "../lib/yahoo.js";
 import { gatherCandidateData, peersForPitch, publishPitchLabReport, publishMandateReview } from "../lib/pitch-lab-peer-bridge.js";
 import { publishPitchLabSnapshot } from "../lib/pitch-lab-snapshot-publisher.js";
+import { publishMandateReviewHistory } from "../lib/pitch-lab-review-publisher.js";
 import { analyzePitchLab } from "../lib/pitch-lab/analysis.js";
 import { runDailyPitches } from "../lib/pitch-lab/daily-runner.js";
 import { buildPitchLabSnapshot } from "../lib/pitch-lab/dashboard-snapshot.js";
@@ -360,14 +361,43 @@ export async function runPitchLabMandateReview({ env = process.env, now = () => 
     try { await sendMessage("🚨 Pitch Lab Mandate Review could not be published to Redis (not configured)."); } catch (_) {}
   }
 
+  const historyPublished = await refreshReviewHistory({ store: canonical, agentId: review.agentId, redis: cache, now });
+
   await sendTelegramOnce(
     `pitchlab:telegram:mandate-review:${review.id ?? review.period}`,
     formatMandateReviewTelegram(review),
     { redis: cache, send },
   );
 
-  console.log(`[PitchLab] Mandate Review complete: status=${review.status} stored=${stored} published=${published}`);
-  return { status: review.status, stored, published };
+  console.log(`[PitchLab] Mandate Review complete: status=${review.status} stored=${stored} published=${published} history=${historyPublished}`);
+  return { status: review.status, stored, published, historyPublished };
+}
+
+/**
+ * Republish every stored review period (Postgres → the website's history index).
+ * Presentation only: a failure is loud (log + Telegram) but never undoes or fails
+ * the review that was already stored and published.
+ */
+export async function refreshReviewHistory({ store, agentId = AGENT_ID, redis, now = () => new Date(), publish = publishMandateReviewHistory, notify = sendMessage, log = console } = {}) {
+  try {
+    const reviews = await store.listMandateReviews({ agentId });
+    const published = await publish(reviews, { redis, now });
+    if (!published) throw new Error("Redis not configured");
+    return true;
+  } catch (error) {
+    log.error(`[PitchLab] Mandate Review history was NOT published: ${error?.message ?? error}`);
+    try { await notify(`🚨 Pitch Lab Mandate Review history could not be published: ${String(error?.message ?? error).slice(0, 300)}`); } catch (_) {}
+    return false;
+  }
+}
+
+/** Manual repair: republish the review history from Postgres without generating a review. */
+export async function runPitchLabReviewHistory({ env = process.env, now = () => new Date(), store, pool, redis } = {}) {
+  if (!pitchLabEnabled(env)) return { status: "disabled" };
+  const cache = redis === undefined ? getRedis() : redis;
+  if (!cache) throw new Error("Redis is required to publish the Mandate Review history.");
+  const published = await refreshReviewHistory({ store: store ?? openPostgresPitchStore({ pool }), redis: cache, now });
+  return { status: published ? "ok" : "failed", published };
 }
 
 /** The scheduler's atomic daily unit: finish all pitches, then grade and notify. */
@@ -385,12 +415,12 @@ export async function runPitchLabDailyCycle({ runDaily = runPitchLabDaily, runGr
   return { ...daily, grade: gradeResult, status: gradeResult.status === "ok" ? daily.status : gradeResult.status };
 }
 
-// Manual run: `node jobs/pitch-lab-daily.js [daily|grade|report|mandate-review] [--dry-run]`
+// Manual run: `node jobs/pitch-lab-daily.js [daily|grade|report|mandate-review|review-history] [--dry-run]`
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
   const [task = "daily"] = process.argv.slice(2).filter((a) => !a.startsWith("--"));
-  const jobs = { daily: runPitchLabDaily, grade: runPitchLabGrade, report: runPitchLabReport, "mandate-review": runPitchLabMandateReview };
+  const jobs = { daily: runPitchLabDaily, grade: runPitchLabGrade, report: runPitchLabReport, "mandate-review": runPitchLabMandateReview, "review-history": runPitchLabReviewHistory };
   if (!jobs[task]) {
-    console.error("usage: node jobs/pitch-lab-daily.js [daily|grade|report|mandate-review] [--dry-run]   (requires PITCH_LAB_ENABLED=1)");
+    console.error("usage: node jobs/pitch-lab-daily.js [daily|grade|report|mandate-review|review-history] [--dry-run]   (requires PITCH_LAB_ENABLED=1)");
     process.exit(1);
   }
   const result = await jobs[task]({ dryRun: process.argv.includes("--dry-run") });

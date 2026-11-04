@@ -122,7 +122,7 @@ test("pitches without a rationale are rejected", () => {
 });
 
 test("pitch validation fails closed on conviction, action, features and look-ahead", () => {
-  for (const conviction of [0, 6, 3.5, "4", null]) {
+  for (const conviction of [0, 11, 3.5, "4", null]) {
     assert.throws(() => buildPitch(validInput({ conviction })), PitchValidationError, `conviction ${conviction}`);
   }
   assert.throws(() => buildPitch(validInput({ action: "SELL" })), /action/);
@@ -254,7 +254,8 @@ test("model reply becomes a pitch; system-supplied features are not model-editab
   const features = buildFeatures({ bars: [], marketCap: 2e9, asOf: "2026-09-21T13:00:00Z" });
   const prompt = buildPitchPrompt({ ticker: "NET", features, entryReference: { price: 100, asOf: "2026-09-21T13:00:00Z" } });
   assert.match(prompt, /revGrowth \(Revenue growth \(YoY\)\): MISSING/);
-  assert.match(prompt, /5 = Very high/);
+  assert.match(prompt, /9 = Very high/);
+  assert.match(prompt, /10 = Exceptional/);
   assert.ok(PITCH_RESPONSE_SCHEMA.required.includes("conviction"));
   const reply = {
     conviction: 2,
@@ -268,8 +269,8 @@ test("model reply becomes a pitch; system-supplied features are not model-editab
   const pitch = pitchFromModelResponse(reply, { ticker: "NET", pitchedAt: "2026-09-21T14:00:00Z", features, entryReference: { price: 100, asOf: "2026-09-21T13:00:00Z" } });
   assert.equal(pitch.conviction, 2);
   assert.equal(pitch.features.revGrowth.missing, true);
-  assert.equal(pitch.provenance.promptVersion, "pitch-lab.prompt.v3");
-  assert.throws(() => pitchFromModelResponse({ ...reply, conviction: 9 }, { ticker: "NET", pitchedAt: "2026-09-21T14:00:00Z", features, entryReference: { price: 100, asOf: "2026-09-21T13:00:00Z" } }), PitchValidationError);
+  assert.equal(pitch.provenance.promptVersion, "pitch-lab.prompt.v4");
+  assert.throws(() => pitchFromModelResponse({ ...reply, conviction: 11 }, { ticker: "NET", pitchedAt: "2026-09-21T14:00:00Z", features, entryReference: { price: 100, asOf: "2026-09-21T13:00:00Z" } }), PitchValidationError);
 });
 
 test("preview page embeds the report safely", () => {
