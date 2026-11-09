@@ -20,6 +20,7 @@ import "dotenv/config";
 import cron from "node-cron";
 import { runPitchLabDailyCycle, runPitchLabReport, runPitchLabMandateReview, pitchLabEnabled } from "./jobs/pitch-lab-daily.js";
 import { sendMessage } from "./lib/telegram.js";
+import { isMandateReviewDay } from "./lib/pitch-lab/schedule.js";
 
 const TZ = { timezone: "America/New_York" };
 
@@ -42,10 +43,10 @@ function guarded(name, job) {
 
 cron.schedule("40 18 * * 1-5", guarded("daily", () => runPitchLabDailyCycle()), TZ);
 cron.schedule("0 10 * * 6", guarded("report", () => runPitchLabReport()), TZ);
-// Monthly: first Saturday only (getDate() ≤ 7). Runs after the weekly report.
+// Monthly: first Saturday only (lib/pitch-lab/schedule.js — the same rule the website's
+// "next review" date uses). Runs after the weekly report.
 cron.schedule("0 11 * * 6", guarded("mandate-review", () => {
-  const now = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
-  if (now.getDate() > 7) { console.log("[PitchLabScheduler] mandate-review: not the first Saturday, skipping."); return Promise.resolve({ status: "skipped" }); }
+  if (!isMandateReviewDay(new Date())) { console.log("[PitchLabScheduler] mandate-review: not the first Saturday, skipping."); return Promise.resolve({ status: "skipped" }); }
   return runPitchLabMandateReview();
 }), TZ);
 
