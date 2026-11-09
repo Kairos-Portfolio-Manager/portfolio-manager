@@ -122,7 +122,7 @@ test("pitches without a rationale are rejected", () => {
 });
 
 test("pitch validation fails closed on conviction, action, features and look-ahead", () => {
-  for (const conviction of [0, 6, 3.5, "4", null]) {
+  for (const conviction of [0, 11, 3.5, "4", null]) {
     assert.throws(() => buildPitch(validInput({ conviction })), PitchValidationError, `conviction ${conviction}`);
   }
   assert.throws(() => buildPitch(validInput({ action: "SELL" })), /action/);
@@ -195,7 +195,9 @@ test("analysis recovers planted effects (positive and negative) and ignores nois
   assert.ok(byId.peerValuation.spearman.rho < 0);
   const noisy = h.metrics.filter((m) => !["revGrowth", "peerValuation"].includes(m.id) && ["positive", "negative"].includes(m.verdict.label));
   assert.ok(noisy.length <= 1, `too many false discoveries: ${noisy.map((m) => m.id)}`);
-  assert.equal(h.conviction.buckets.length, 5);
+  assert.equal(h.conviction.scale, 10);
+  assert.equal(h.conviction.buckets.length, 10);
+  assert.equal(h.convictionLegacy, null); // demo data is all 1-10; no legacy cohort
   assert.doesNotThrow(() => JSON.parse(JSON.stringify(report)));
 });
 
@@ -254,7 +256,8 @@ test("model reply becomes a pitch; system-supplied features are not model-editab
   const features = buildFeatures({ bars: [], marketCap: 2e9, asOf: "2026-09-21T13:00:00Z" });
   const prompt = buildPitchPrompt({ ticker: "NET", features, entryReference: { price: 100, asOf: "2026-09-21T13:00:00Z" } });
   assert.match(prompt, /revGrowth \(Revenue growth \(YoY\)\): MISSING/);
-  assert.match(prompt, /5 = Very high/);
+  assert.match(prompt, /9 = Very high/);
+  assert.match(prompt, /10 = Exceptional/);
   assert.ok(PITCH_RESPONSE_SCHEMA.required.includes("conviction"));
   const reply = {
     conviction: 2,
@@ -268,8 +271,8 @@ test("model reply becomes a pitch; system-supplied features are not model-editab
   const pitch = pitchFromModelResponse(reply, { ticker: "NET", pitchedAt: "2026-09-21T14:00:00Z", features, entryReference: { price: 100, asOf: "2026-09-21T13:00:00Z" } });
   assert.equal(pitch.conviction, 2);
   assert.equal(pitch.features.revGrowth.missing, true);
-  assert.equal(pitch.provenance.promptVersion, "pitch-lab.prompt.v3");
-  assert.throws(() => pitchFromModelResponse({ ...reply, conviction: 9 }, { ticker: "NET", pitchedAt: "2026-09-21T14:00:00Z", features, entryReference: { price: 100, asOf: "2026-09-21T13:00:00Z" } }), PitchValidationError);
+  assert.equal(pitch.provenance.promptVersion, "pitch-lab.prompt.v4");
+  assert.throws(() => pitchFromModelResponse({ ...reply, conviction: 11 }, { ticker: "NET", pitchedAt: "2026-09-21T14:00:00Z", features, entryReference: { price: 100, asOf: "2026-09-21T13:00:00Z" } }), PitchValidationError);
 });
 
 test("preview page embeds the report safely", () => {
@@ -546,8 +549,10 @@ test("only the bridge touches the database; Pitch Lab and its CLI never import i
   const bridge = readFileSync(new URL("../lib/pitch-lab-peer-bridge.js", import.meta.url), "utf8");
   const redisNames = [...bridge.matchAll(/\b(getPeerMetrics|requestPeerCoverage|set[A-Z]\w*|append\w*|delete\w*)\b/g)].map((m) => m[1]);
   assert.deepEqual([...new Set(redisNames)].sort(), ["getPeerMetrics", "requestPeerCoverage"], "the bridge may only read the peer table and file coverage requests");
-  assert.equal((bridge.match(/\.set\(/g) ?? []).length, 1, "besides the request queue, the bridge may write exactly one namespaced report key");
+  assert.equal((bridge.match(/\.set\(/g) ?? []).length, 2, "besides the request queue, the bridge may write exactly two namespaced keys: the report and the mandate review");
   assert.match(bridge, /client\.set\(PITCH_LAB_REPORT_KEY,/);
+  assert.match(bridge, /client\.set\(PITCH_LAB_MANDATE_REVIEW_KEY,/);
+  assert.match(bridge, /PITCH_LAB_MANDATE_REVIEW_KEY = "pitchlab:/, "the mandate review key must stay under the pitchlab: namespace");
 });
 
 test("pitch lab never imports production write paths", async () => {

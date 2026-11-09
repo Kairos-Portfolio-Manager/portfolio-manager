@@ -212,7 +212,7 @@ test("a daily run records the draw, then one valid pitch per pick with peers, pr
     assert.equal(p.provenance.source, "live");
     assert.equal(p.provenance.mandateVersion, "agent_one_v3.0");
     assert.equal(p.provenance.model, "test-model");
-    assert.equal(p.provenance.promptVersion, "pitch-lab.prompt.v3");
+    assert.equal(p.provenance.promptVersion, "pitch-lab.prompt.v4");
     assert.equal(p.context.sector, "Technology");
     assert.ok(["screen", "random"].includes(p.context.selection));
     assert.equal(p.peers.ranks.revGrowth.status, "ranked");
@@ -285,7 +285,7 @@ test("one bad reply drops that pitch loudly and the rest still land", async () =
       callModel: async () => {
         n += 1;
         if (n === 1) return { text: "Here is my pitch: BUY!", costUsd: 0.01 }; // not JSON
-        if (n === 2) return { text: goodReply({ conviction: 9 }), costUsd: 0.01 }; // out of range
+        if (n === 2) return { text: goodReply({ conviction: 11 }), costUsd: 0.01 }; // out of range (1-10)
         if (n === 3) throw new Error("reply hit max_tokens — discarded (fail closed)");
         return { text: goodReply(), costUsd: 0.01 };
       },

@@ -10,12 +10,17 @@ test("daily Pitch Lab message is concise, human-readable, and explicit that it i
       ticker: "NET", conviction: 5,
       rationale: { thesis: "Revenue acceleration and improving price action support a short-term setup.", risks: ["Enterprise demand could slow."] },
       peers: { ranks: { revGrowth: { status: "ranked", percentile: 0.86 }, peerValuation: { status: "ranked", percentile: 0.41 } } },
+    }, {
+      ticker: "DDOG", conviction: 8, convictionScale: 10, peers: null,
+      rationale: { thesis: "Usage-based revenue is re-accelerating with expanding gross margin.", risks: ["Cloud optimisation could return."] },
     }],
     outcomes: [{ horizonDays: 5, excessReturn: 0.012 }, { horizonDays: 5, excessReturn: -0.004 }],
     run: { status: "partial", selected: 3, failedCount: 1, shortfall: 2 },
   });
   assert.match(message, /🧪 Pitch Lab/);
-  assert.match(message, /NET — 5\/5/);
+  // An older pitch keeps its 1-5 scale; revGrowth top 25% (1.125 of 1.5) + P/E bottom half (0 of 0.8) → 1.125/2.3 → 4.9.
+  assert.match(message, /NET — conviction 5\/5 · Mandate 4\.9\/10 \(2\/9 metrics\)/);
+  assert.match(message, /DDOG — conviction 8\/10 · Mandate score unavailable \(no peer ranks\)/);
   assert.match(message, /Revenue growth \(YoY\) 86th percentile/);
   assert.match(message, /1\/2 beat SPY; average \+0\.4%/);
   assert.match(message, /1 pitch was dropped/);
