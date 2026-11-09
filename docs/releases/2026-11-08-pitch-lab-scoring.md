@@ -52,7 +52,7 @@ releases (including money/control changes). **Stop and tell Sam.**
 git switch mandate-v3
 git pull --ff-only origin mandate-v3
 git rev-parse HEAD                 # must equal the release SHA from Sam
-npm test                           # ~8 min; expect 1337/1337
+npm test                           # expect 1337/1337; ~8 min on a Mac, longer on the Jetson. The pitch-lab-mandate-review* files print nothing for several minutes: not a hang
 npm run db:migrate                 # applies 0011 (new table only, additive)
 npm run deploy:restart             # signed restart of portfolio-manager — never plain pm2 restart for it
 pm2 restart pitch-lab              # separate process; it does not restart on its own
