@@ -28,10 +28,14 @@ Agent One ──► pitch record ──► Postgres pitch_lab_pitches      (appe
 | Piece | File | What it does |
 |---|---|---|
 | Metric catalog | `lib/pitch-lab/features.js` | The fixed list recorded on **every** pitch: the mandate's 9 fundamentals (ids from `config/scoring/mandate-v2.js`) + 6 price features (incl. `atrBelow20dHigh`: how many ATRs below the 20-day high) + company size. Missing = recorded as missing, never filled. |
-| Pitch record | `lib/pitch-lab/pitch.js` | Validates and freezes a pitch. **Rejects any pitch without a rationale** (thesis ≥ 40 chars, ≥ 1 reason, ≥ 1 risk), conviction outside integer 1–5, unknown metric ids, or any data timestamp after the pitch time (look-ahead). Buy-only. Content-hash id. |
+| Pitch record | `lib/pitch-lab/pitch.js` | Validates and freezes a pitch. **Rejects any pitch without a rationale** (thesis ≥ 40 chars, ≥ 1 reason, ≥ 1 risk), conviction outside integer 1–10 (pitch v3; older v1/v2 pitches keep their 1–5 scale and are never rescaled), unknown metric ids, or any data timestamp after the pitch time (look-ahead). Buy-only. Content-hash id. |
+| Mandate Score | `lib/pitch-lab/score-breakdown.js` | Pure. The mandate's points table applied to the pitch's stored peer percentiles, on a /10 scale (Agent One: A 2.5 · B 3 · C 3 · D 1.5). Missing is never zero: score = points earned ÷ points scorable × 10, and coverage always travels with it. Computed by code in `buildPitch`; a supplied breakdown that doesn't match is rejected. **The model never sees it.** |
 | Model contract | `lib/pitch-lab/pitch-prompt.js` | Prompt + JSON schema for Agent One. The **model supplies only judgment** (conviction on a fixed rubric, rationale whose reasons cite metric ids). The **system supplies every number**, so the model cannot invent the data it is graded on. |
 | Grading | `lib/pitch-lab/grading.js` | Entry = first close after the pitch; exit = close N trading sessions later; success = return after round-trip costs **minus** the benchmark (SPY) over the same sessions. |
 | Analysis | `lib/pitch-lab/analysis.js` | Per time period × holding period: conviction and per-metric correlation factors with uncertainty. |
+| Schedule | `lib/pitch-lab/schedule.js` | Next weekly report (Sat 10:00 ET) and Mandate Review (first Saturday of the month, 11:00 ET). |
+| Dashboard snapshot | `lib/pitch-lab/dashboard-snapshot.js` | Small `pitch-lab.snapshot.v2` payload for the website status page (schedule, recent pitches with excess returns, per-pitch Mandate Score breakdown, legacy conviction mixes). |
+| Review history | `lib/pitch-lab-review-publisher.js` | Publishes each Mandate Review to `pitchlab:mandate-review:<id>` plus the `pitchlab:mandate-reviews` index (CLI task `review-history`). |
 | Statistics | `lib/pitch-lab/stats.js` | Spearman, clustered regression, cluster bootstrap, t-distribution, Benjamini–Hochberg. Pure, no dependencies. |
 | Storage | `lib/pg/pitch-lab-store.js` + migration `0010` | Canonical Postgres selections, pitches, and outcomes. Unique constraints refuse duplicates; database triggers reject update/delete. `lib/pitch-lab/store.js` remains the local demo/test adapter. |
 | Peer ranks | `lib/pitch-lab/peer-rank.js` | Pure. Ranks each of the 9 mandate metrics against the company's industry peers (see below). |
@@ -219,23 +223,25 @@ graded pitches spread over months to show up. The per-month view will say
 
 ## Report contract (what the website reads)
 
-`report.json`, `schemaVersion: "pitch-lab.report.v2"` (v2 adds `peerMetrics` per horizon and `dataCoverage`; pitch records are `pitch-lab.pitch.v2`):
+`report.json`, `schemaVersion: "pitch-lab.report.v3"` (v2 added `peerMetrics` per horizon and `dataCoverage`; v3 analyses conviction one scale at a time — `conviction` is the 1–10 cohort, `convictionLegacy` the old 1–5 pitches, never mixed — and adds `mandateScore` and per-horizon `clusters`; pitch records are `pitch-lab.pitch.v3`):
 
 ```
 { schemaVersion, gradingVersion, generatedAt, dataSources[], isSyntheticDemo,
   totals: { pitches, gradedByHorizon: { "5": n, ... } },
   assumptions: { benchmark[], costPerSide[], success },
-  options, convictionRubric,
+  options, convictionScale, convictionRubric, legacyConvictionRubric /* null when no 1–5 pitches */,
   periods: [ { id, label, from, to, pitchCount,
-    horizons: [ { horizonDays, graded, meanExcessReturn, hitRate,
-      conviction: { n, clusters, spearman: { rho, ci95 }, excessReturnPerPoint: { estimate, se, ci95, pValue, df },
+    horizons: [ { horizonDays, graded, clusters, meanExcessReturn, hitRate,
+      conviction: { scale, n, clusters, spearman: { rho, ci95 }, excessReturnPerPoint: { estimate, se, ci95, pValue, df },
                     buckets: [ { conviction, meaning, n, meanExcessReturn, medianExcessReturn, hitRate, hitRateCi95 } ],
                     verdict: { label, summary } },
       metrics: [ { id, label, group, coverage: { present, missing }, clusters, spearman: { rho, ci95 },
                    excessReturnPerSd: { estimate, se, ci95, pValue, qValue },
                    missingVsPresent: { meanExcessPresent, meanExcessMissing, difference },
                    verdict: { label, summary } } ],   // sorted by |rho|
-      peerMetrics: [ ...same shape, one per mandate metric, tested on its industry-peer percentile; group: "peer_rank" ]
+      convictionLegacy: { ...same shape as conviction, scale 5 } | null,
+      peerMetrics: [ ...same shape, one per mandate metric, tested on its industry-peer percentile; group: "peer_rank" ],
+      mandateScore: { ...one metric block, id "mandateScore", its own family so it never shifts metric q-values }
     } ] } ],
   dataCoverage: { pitches, pitchesWithPeerData, peerSetLevel, peerSetMode, peerSetReason,
     peerRankStatus: { [metricId]: { ranked, thin_peers, no_peers, missing_value, peer_data_unavailable, not_recorded, rankedShare } },

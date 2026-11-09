@@ -195,7 +195,9 @@ test("analysis recovers planted effects (positive and negative) and ignores nois
   assert.ok(byId.peerValuation.spearman.rho < 0);
   const noisy = h.metrics.filter((m) => !["revGrowth", "peerValuation"].includes(m.id) && ["positive", "negative"].includes(m.verdict.label));
   assert.ok(noisy.length <= 1, `too many false discoveries: ${noisy.map((m) => m.id)}`);
-  assert.equal(h.conviction.buckets.length, 5);
+  assert.equal(h.conviction.scale, 10);
+  assert.equal(h.conviction.buckets.length, 10);
+  assert.equal(h.convictionLegacy, null); // demo data is all 1-10; no legacy cohort
   assert.doesNotThrow(() => JSON.parse(JSON.stringify(report)));
 });
 
