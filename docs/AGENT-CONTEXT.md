@@ -27,7 +27,7 @@ To have full *code* context, a collaborator needs access to both GitHub reposito
 3. `INVARIANTS.md` before touching proposals, execution, ledgers, NAV, or investor views.
 4. `ARCHITECTURE.md` and `CHANGE_MAP.md` before designing or editing a change.
 5. `RISK_REGISTER.md`, `TEST_PLAN.md`, and `RUNBOOK.md` for known gaps, verification, and operations.
-6. `portfolio-master-plan.md` for the active phase, gate, and release branch. The production backend release branch is currently `mandate-v3`; never assume `main`.
+6. `portfolio-master-plan.md` for the active phase, gate, and release branch. `main` is the release branch ([ADR-0006](adr/0006-main-is-the-release-branch.md)). Until the master plan records the Jetson cutover, the Jetson still runs `mandate-v3`: state the branch and exact commit before any deploy and verify them after.
 7. In the sibling repository, read `../portfolio-dashboard/CLAUDE.md` and `../portfolio-dashboard/docs/AGENT-CONTEXT.md` before dashboard or companion work.
 
 ## Non-negotiable execution boundary
