@@ -222,6 +222,29 @@ TRUST semantics. It starts a fresh SKILL evidence cohort; because the already
 planned July 20 release day cannot count, July 21 remains the earliest possible
 Phase 0 Day 1.
 
+### Declared 2026-11-08: Pitch Lab scoring + Mandate Review release
+
+**Phase label: SKILL · Change class: R1 + R2 (Pitch Lab only) · Status: approved by Sam, awaiting Jetson deploy**
+
+- **Scope:** paper-only Pitch Lab. Mandate Review (monthly memo, migration `0011`,
+  append-only), a code-computed Mandate Score /10 on each pitch (the model never
+  sees it), conviction moved from 1–5 to 1–10 (pitch v3, prompt v4), report v3,
+  website snapshot v2 and review-history keys.
+- **Authority:** unchanged. Nothing gains proposal, approval, signature, broker,
+  ledger or execution reach; Pitch Lab modules stay outside the execution path.
+- **Clock effect:** TRUST window unaffected (no S-class change; ops-watch coverage
+  unchanged). The 1–10 conviction scale opens a **new Pitch Lab research cohort**
+  starting with the first pitch recorded after deploy; earlier 1–5 pitches are kept,
+  never rescaled, and analysed separately. Agent proposal cohorts are unaffected.
+- **Release revision:** the `mandate-v3` head after the release PR merges. Record the
+  loaded SHA and restart edge here after deploy, then update **Current release** above.
+- **Deploy and rollback:** `docs/releases/2026-11-08-pitch-lab-scoring.md`
+  (dashboard first, migration `0011`, signed restart, `pitch-lab` restart, stop check
+  if the Jetson is behind `mandate-v3`).
+- **Required evidence:** full tests, exact SHA, signed restart, health, fresh logs,
+  `db:migrate` output, and the first post-deploy daily run storing v3 pitches with
+  a Mandate Score.
+
 ## 6. Immediate gate-closing release — Phase G0
 
 **Phase label: BOTH · Status: complete · Owner: systems owner + independent reviewer**
