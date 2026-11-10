@@ -31,14 +31,17 @@ import { getRedis, getUniverseCatalog } from "../lib/redis.js";
 import { mandateVersionFor } from "../lib/research-version.js";
 import { sendMessage } from "../lib/telegram.js";
 import { fetchDailyBars } from "../lib/yahoo.js";
-import { gatherCandidateData, peersForPitch, publishPitchLabReport } from "../lib/pitch-lab-peer-bridge.js";
+import { gatherCandidateData, peersForPitch, publishPitchLabReport, publishMandateReview } from "../lib/pitch-lab-peer-bridge.js";
 import { publishPitchLabSnapshot } from "../lib/pitch-lab-snapshot-publisher.js";
+import { publishMandateReviewHistory } from "../lib/pitch-lab-review-publisher.js";
 import { analyzePitchLab } from "../lib/pitch-lab/analysis.js";
 import { runDailyPitches } from "../lib/pitch-lab/daily-runner.js";
 import { buildPitchLabSnapshot } from "../lib/pitch-lab/dashboard-snapshot.js";
 import { gradeMaturedPitches } from "../lib/pitch-lab/grade-runner.js";
 import { renderReportHtml } from "../lib/pitch-lab/render-html.js";
-import { formatPitchLabDailyTelegram, formatPitchLabWeeklyTelegram } from "../lib/pitch-lab/telegram.js";
+import { formatPitchLabDailyTelegram, formatPitchLabWeeklyTelegram, formatMandateReviewTelegram } from "../lib/pitch-lab/telegram.js";
+import { generateMandateReview } from "../lib/pitch-lab/mandate-review.js";
+import { AGENT_SCORING } from "../config/scoring/mandate-v2.js";
 import { defaultPitchLabDir } from "../lib/pitch-lab/store.js";
 import { openPostgresPitchStore } from "../lib/pg/pitch-lab-store.js";
 
@@ -305,6 +308,98 @@ export async function runPitchLabReport({ env = process.env, now = () => new Dat
   return { status: "ok", pitches: report.totals.pitches, published };
 }
 
+/**
+ * Monthly Mandate Review: load pitches + outcomes from Postgres, derive the
+ * statistical report, run generateMandateReview, persist to Postgres (append-
+ * only), publish to Redis for the website, and send one Telegram digest.
+ *
+ * Runs on the first Saturday of each month (the scheduler checks getDate() ≤ 7).
+ * Idempotent within the month: the Postgres content-hash key deduplicates any
+ * re-run with identical data.
+ *
+ * This function never modifies the mandate config, creates a proposal, writes
+ * to a ledger, or contacts a broker.
+ */
+export async function runPitchLabMandateReview({ env = process.env, now = () => new Date(), store, pool, redis, send } = {}) {
+  if (!pitchLabEnabled(env)) return { status: "disabled" };
+  const canonical = store ?? openPostgresPitchStore({ pool });
+  const [pitchRows, outcomeRows] = await Promise.all([canonical.listPitches(), canonical.listOutcomes()]);
+  const report = analyzePitchLab({ pitches: pitchRows, outcomes: outcomeRows, now: now() });
+  let review;
+  try {
+    review = generateMandateReview(report, AGENT_SCORING[AGENT_ID], { now: now(), agentId: AGENT_ID });
+  } catch (error) {
+    console.error(`[PitchLab] Mandate Review generation failed: ${error.message}`);
+    try { await sendMessage(`🚨 Pitch Lab Mandate Review generation failed: ${String(error?.message ?? error).slice(0, 300)}`); } catch (_) {}
+    throw error;
+  }
+
+  // Persist to Postgres (append-only; a rerun on identical data maps to the same id).
+  // On a duplicate, publish and announce the stored review, not the new copy.
+  let stored = false;
+  try {
+    review = await canonical.appendMandateReview(review);
+    stored = true;
+  } catch (error) {
+    if (error?.code === "mandate_review_already_recorded") {
+      stored = true;
+      const existing = (await canonical.listMandateReviews({ agentId: review.agentId })).find((row) => row.id === error.reviewId);
+      if (existing) review = existing;
+      console.log(`[PitchLab] Mandate Review already stored for this content; skipping duplicate write.`);
+    } else {
+      console.error(`[PitchLab] Mandate Review Postgres write failed: ${error.message}`);
+      try { await sendMessage(`🚨 Pitch Lab Mandate Review Postgres write failed: ${String(error?.message ?? error).slice(0, 300)}`); } catch (_) {}
+      throw error;
+    }
+  }
+
+  const cache = redis === undefined ? getRedis() : redis;
+  if (!cache) throw new Error("Redis is required to publish the Mandate Review for the website.");
+  const published = await publishMandateReview(review, { redis: cache, now });
+  if (!published) {
+    console.error("[PitchLab] Mandate Review published=false — Redis not configured. Website will not update.");
+    try { await sendMessage("🚨 Pitch Lab Mandate Review could not be published to Redis (not configured)."); } catch (_) {}
+  }
+
+  const historyPublished = await refreshReviewHistory({ store: canonical, agentId: review.agentId, redis: cache, now });
+
+  await sendTelegramOnce(
+    `pitchlab:telegram:mandate-review:${review.id ?? review.period}`,
+    formatMandateReviewTelegram(review),
+    { redis: cache, send },
+  );
+
+  console.log(`[PitchLab] Mandate Review complete: status=${review.status} stored=${stored} published=${published} history=${historyPublished}`);
+  return { status: review.status, stored, published, historyPublished };
+}
+
+/**
+ * Republish every stored review period (Postgres → the website's history index).
+ * Presentation only: a failure is loud (log + Telegram) but never undoes or fails
+ * the review that was already stored and published.
+ */
+export async function refreshReviewHistory({ store, agentId = AGENT_ID, redis, now = () => new Date(), publish = publishMandateReviewHistory, notify = sendMessage, log = console } = {}) {
+  try {
+    const reviews = await store.listMandateReviews({ agentId });
+    const published = await publish(reviews, { redis, now });
+    if (!published) throw new Error("Redis not configured");
+    return true;
+  } catch (error) {
+    log.error(`[PitchLab] Mandate Review history was NOT published: ${error?.message ?? error}`);
+    try { await notify(`🚨 Pitch Lab Mandate Review history could not be published: ${String(error?.message ?? error).slice(0, 300)}`); } catch (_) {}
+    return false;
+  }
+}
+
+/** Manual repair: republish the review history from Postgres without generating a review. */
+export async function runPitchLabReviewHistory({ env = process.env, now = () => new Date(), store, pool, redis } = {}) {
+  if (!pitchLabEnabled(env)) return { status: "disabled" };
+  const cache = redis === undefined ? getRedis() : redis;
+  if (!cache) throw new Error("Redis is required to publish the Mandate Review history.");
+  const published = await refreshReviewHistory({ store: store ?? openPostgresPitchStore({ pool }), redis: cache, now });
+  return { status: published ? "ok" : "failed", published };
+}
+
 /** The scheduler's atomic daily unit: finish all pitches, then grade and notify. */
 export async function runPitchLabDailyCycle({ runDaily = runPitchLabDaily, runGrade = runPitchLabGrade } = {}) {
   const daily = await runDaily();
@@ -320,12 +415,12 @@ export async function runPitchLabDailyCycle({ runDaily = runPitchLabDaily, runGr
   return { ...daily, grade: gradeResult, status: gradeResult.status === "ok" ? daily.status : gradeResult.status };
 }
 
-// Manual run: `node jobs/pitch-lab-daily.js [daily|grade|report] [--dry-run]`
+// Manual run: `node jobs/pitch-lab-daily.js [daily|grade|report|mandate-review|review-history] [--dry-run]`
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
   const [task = "daily"] = process.argv.slice(2).filter((a) => !a.startsWith("--"));
-  const jobs = { daily: runPitchLabDaily, grade: runPitchLabGrade, report: runPitchLabReport };
+  const jobs = { daily: runPitchLabDaily, grade: runPitchLabGrade, report: runPitchLabReport, "mandate-review": runPitchLabMandateReview, "review-history": runPitchLabReviewHistory };
   if (!jobs[task]) {
-    console.error("usage: node jobs/pitch-lab-daily.js [daily|grade|report] [--dry-run]   (requires PITCH_LAB_ENABLED=1)");
+    console.error("usage: node jobs/pitch-lab-daily.js [daily|grade|report|mandate-review|review-history] [--dry-run]   (requires PITCH_LAB_ENABLED=1)");
     process.exit(1);
   }
   const result = await jobs[task]({ dryRun: process.argv.includes("--dry-run") });
