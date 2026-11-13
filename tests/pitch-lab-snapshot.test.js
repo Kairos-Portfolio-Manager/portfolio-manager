@@ -221,7 +221,59 @@ test("publisher is time-bounded: a Redis call that never settles cannot hold the
 test("the weekly report no longer overwrites the daily snapshot (it would drop the latest run's status)", () => {
   const src = readFileSync(new URL("../jobs/pitch-lab-daily.js", import.meta.url), "utf8");
   const calls = [...src.matchAll(/await refreshDashboardSnapshot\(/g)].length;
-  assert.equal(calls, 1, "only the daily grade/digest path refreshes the snapshot");
-  const report = src.slice(src.indexOf("export async function runPitchLabReport"), src.indexOf("export async function runPitchLabDailyCycle"));
-  assert.ok(!/refreshDashboardSnapshot\(/.test(report.replace(/\/\/.*$/gm, "")));
+  assert.equal(calls, 2, "the daily grade/digest path, plus refreshSnapshotFromStore (which re-attaches the run summary)");
+  const fn = (name) => { const start = src.indexOf(`export async function ${name}`); return src.slice(start, src.indexOf("\nexport ", start + 1)).replace(/\/\/.*$/gm, ""); };
+  assert.ok(!/refreshDashboardSnapshot\(|refreshSnapshotFromStore\(/.test(fn("runPitchLabReport")), "the weekly report never touches the snapshot");
+  const store = src.slice(src.indexOf("async function refreshSnapshotFromStore"), src.indexOf("export async function runPitchLabSnapshot"));
+  assert.match(store, /dailyRunKey\(lastDate\)/, "an out-of-cycle refresh keeps the latest run's status");
+});
+
+test("performers: best and worst by RAW return over each pitch's longest matured period, with the day we got in", () => {
+  const raw = (pitchId, horizonDays, grossReturn, entryDate) => ({ pitchId, horizonDays, grossReturn, excessReturn: grossReturn - 0.01, gradedAt: "2026-11-10T22:45:00.000Z", entryDate, exitDate: "2026-11-10" });
+  const pitches = [
+    pitch("a", "AAA", 7, "2026-10-01"), pitch("b", "BBB", 7, "2026-10-02"), pitch("c", "CCC", 7, "2026-10-05"),
+    pitch("d", "DDD", 7, "2026-10-06"), pitch("e", "EEE", 7, "2026-10-07"), pitch("f", "FFF", 7, "2026-10-08"),
+    pitch("g", "GGG", 7, "2026-10-09"), pitch("h", "AAA", 7, "2026-10-12"), // AAA pitched twice: two rows
+    pitch("pending", "PPP", 9, "2026-11-12"),
+  ];
+  const outcomes = [
+    raw("a", 5, 0.50, "2026-10-02"), raw("a", 20, 0.10, "2026-10-02"), // longest period wins, not the best one
+    raw("b", 20, 0.30, "2026-10-05"), raw("c", 20, -0.40, "2026-10-06"), raw("d", 10, 0.05, "2026-10-07"),
+    raw("e", 20, -0.02, "2026-10-08"), raw("f", 20, 0.00, "2026-10-09"), raw("g", 5, -0.10, "2026-10-12"),
+    raw("h", 5, 0.20, "2026-10-13"),
+    { pitchId: "b", horizonDays: 40, excessReturn: 0.1, entryDate: "2026-10-05" }, // no grossReturn: ignored
+  ];
+  const { performers } = buildPitchLabSnapshot({ pitches, outcomes, now: new Date("2026-11-13T12:00:00Z") });
+  assert.equal(performers.ranked, 8, "a pitch with no matured period is not ranked");
+  assert.deepEqual(performers.best.map((r) => [r.ticker, r.rawReturn, r.horizonDays, r.entryDate]), [
+    ["BBB", 0.3, 20, "2026-10-05"], ["AAA", 0.2, 5, "2026-10-13"], ["AAA", 0.1, 20, "2026-10-02"], ["DDD", 0.05, 10, "2026-10-07"], ["FFF", 0, 20, "2026-10-09"],
+  ]);
+  assert.deepEqual(performers.worst.map((r) => r.ticker), ["CCC", "GGG", "EEE"], "worst never repeats a pitch already listed as best");
+  assert.equal(performers.best[0].pitchDate, "2026-10-02");
+  assert.equal(performers.best[0].excessReturn, 0.29);
+
+  const empty = buildPitchLabSnapshot({ pitches: [], outcomes: [], now: new Date("2026-11-13T12:00:00Z") }).performers;
+  assert.deepEqual([empty.ranked, empty.best, empty.worst], [0, [], []]);
+});
+
+test("the manual snapshot task republishes from the store with the latest day's run summary", async () => {
+  const { runPitchLabSnapshot } = await import("../jobs/pitch-lab-daily.js");
+  const writes = new Map();
+  const runSummary = { status: "complete", date: "2026-11-13", selected: 5, pitched: 5, failedCount: 0, shortfall: 0 };
+  const redis = {
+    get: async (key) => (key === "pitchlab:run:daily:2026-11-13" ? JSON.stringify(runSummary) : null),
+    set: async (key, value) => { writes.set(key, value); return "OK"; },
+  };
+  const store = {
+    listPitches: async () => [pitch("a", "AAA", 7, "2026-11-12"), pitch("b", "BBB", 7, "2026-11-13")],
+    listOutcomes: async () => [{ pitchId: "a", horizonDays: 5, grossReturn: 0.02, excessReturn: 0.01, entryDate: "2026-11-13" }],
+  };
+  const result = await runPitchLabSnapshot({ env: { PITCH_LAB_ENABLED: "1" }, store, redis, now: () => new Date("2026-11-13T23:00:00Z") });
+  assert.equal(result.status, "ok");
+  assert.deepEqual([...writes.keys()], [PITCH_LAB_SNAPSHOT_KEY], "writes the one snapshot key and nothing else");
+  const { snapshot } = JSON.parse(writes.get(PITCH_LAB_SNAPSHOT_KEY));
+  assert.equal(snapshot.latest.status, "complete");
+  assert.equal(snapshot.schedule.nextMandateReviewAt, "2026-11-14T16:00:00.000Z");
+  assert.equal(snapshot.performers.best[0].ticker, "AAA");
+  assert.equal((await runPitchLabSnapshot({ env: {}, store, redis })).status, "disabled");
 });
