@@ -31,7 +31,7 @@ import { getRedis, getUniverseCatalog } from "../lib/redis.js";
 import { mandateVersionFor } from "../lib/research-version.js";
 import { sendMessage } from "../lib/telegram.js";
 import { fetchDailyBars } from "../lib/yahoo.js";
-import { gatherCandidateData, peersForPitch, publishPitchLabReport, publishMandateReview } from "../lib/pitch-lab-peer-bridge.js";
+import { consensusForPitch, gatherCandidateData, peersForPitch, publishPitchLabReport, publishMandateReview } from "../lib/pitch-lab-peer-bridge.js";
 import { publishPitchLabSnapshot } from "../lib/pitch-lab-snapshot-publisher.js";
 import { publishMandateReviewHistory } from "../lib/pitch-lab-review-publisher.js";
 import { analyzePitchLab } from "../lib/pitch-lab/analysis.js";
@@ -202,6 +202,7 @@ export async function runPitchLabDaily({ env = process.env, now = () => new Date
     riskLimits: loadRiskLimits(),
     gatherData: overrides.gatherData ?? gatherCandidateData,
     getPeers: overrides.getPeers ?? ((args) => peersForPitch(args)),
+    getConsensus: overrides.getConsensus ?? ((args) => consensusForPitch(args)),
     callModel: overrides.callModel ?? createModelCaller({ monthlyBudget, model, env }),
     // Expected per-name drops stay in logs and the evening digest. The scheduler
     // itself still pages Telegram if the whole job throws.
