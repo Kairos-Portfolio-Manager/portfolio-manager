@@ -309,7 +309,7 @@ export async function runPitchLabReport({ env = process.env, now = () => new Dat
 }
 
 /**
- * Monthly Mandate Review: load pitches + outcomes from Postgres, derive the
+ * Weekly Mandate Review: load pitches + outcomes from Postgres, derive the
  * statistical report, run generateMandateReview, persist to Postgres (append-
  * only), publish to Redis for the website, and send one Telegram digest.
  *
@@ -369,8 +369,46 @@ export async function runPitchLabMandateReview({ env = process.env, now = () => 
     { redis: cache, send },
   );
 
-  console.log(`[PitchLab] Mandate Review complete: status=${review.status} stored=${stored} published=${published} history=${historyPublished}`);
-  return { status: review.status, stored, published, historyPublished };
+  // Move the website's "next Mandate Review" date on to next Saturday now, not at
+  // Monday's grading run. Non-fatal, like every snapshot refresh.
+  const snapshotPublished = await refreshSnapshotFromStore({ store: canonical, pitches: pitchRows, outcomes: outcomeRows, redis: cache, now });
+
+  console.log(`[PitchLab] Mandate Review complete: status=${review.status} stored=${stored} published=${published} history=${historyPublished} snapshot=${snapshotPublished}`);
+  return { status: review.status, stored, published, historyPublished, snapshotPublished };
+}
+
+/**
+ * Rebuild the website snapshot from Postgres outside the daily cycle (after a deploy,
+ * after the Saturday review). Attaches the latest pitch day's run summary when Redis
+ * still holds it, so the page's "latest run" status is not downgraded to unknown.
+ */
+async function refreshSnapshotFromStore({ store, pitches, outcomes, redis, now }) {
+  try {
+    const [pitchRows, outcomeRows] = pitches && outcomes ? [pitches, outcomes] : await Promise.all([store.listPitches(), store.listOutcomes()]);
+    const lastDate = pitchRows.map((p) => etDateString(new Date(p.pitchedAt))).filter(Boolean).sort().at(-1) ?? null;
+    let run = null;
+    if (lastDate) {
+      try {
+        const value = await redis.get(dailyRunKey(lastDate));
+        run = typeof value === "string" ? JSON.parse(value) : value ?? null;
+      } catch (error) {
+        console.warn(`[PitchLab] run summary for ${lastDate} unavailable; snapshot shows its status as unknown: ${error.message}`);
+      }
+    }
+    return await refreshDashboardSnapshot({ pitches: pitchRows, outcomes: outcomeRows, run, redis, now });
+  } catch (error) {
+    console.error(`[PitchLab] snapshot refresh failed (non-fatal): ${error?.message ?? error}`);
+    return false;
+  }
+}
+
+/** Manual: republish the website snapshot now (read-only on Postgres; writes the one snapshot key). */
+export async function runPitchLabSnapshot({ env = process.env, now = () => new Date(), store, pool, redis } = {}) {
+  if (!pitchLabEnabled(env)) return { status: "disabled" };
+  const cache = redis === undefined ? getRedis() : redis;
+  if (!cache) throw new Error("Redis is required to publish the Pitch Lab snapshot.");
+  const published = await refreshSnapshotFromStore({ store: store ?? openPostgresPitchStore({ pool }), redis: cache, now });
+  return { status: published ? "ok" : "failed", published };
 }
 
 /**
@@ -415,12 +453,12 @@ export async function runPitchLabDailyCycle({ runDaily = runPitchLabDaily, runGr
   return { ...daily, grade: gradeResult, status: gradeResult.status === "ok" ? daily.status : gradeResult.status };
 }
 
-// Manual run: `node jobs/pitch-lab-daily.js [daily|grade|report|mandate-review|review-history] [--dry-run]`
+// Manual run: `node jobs/pitch-lab-daily.js [daily|grade|report|mandate-review|review-history|snapshot] [--dry-run]`
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
   const [task = "daily"] = process.argv.slice(2).filter((a) => !a.startsWith("--"));
-  const jobs = { daily: runPitchLabDaily, grade: runPitchLabGrade, report: runPitchLabReport, "mandate-review": runPitchLabMandateReview, "review-history": runPitchLabReviewHistory };
+  const jobs = { daily: runPitchLabDaily, grade: runPitchLabGrade, report: runPitchLabReport, "mandate-review": runPitchLabMandateReview, "review-history": runPitchLabReviewHistory, snapshot: runPitchLabSnapshot };
   if (!jobs[task]) {
-    console.error("usage: node jobs/pitch-lab-daily.js [daily|grade|report|mandate-review|review-history] [--dry-run]   (requires PITCH_LAB_ENABLED=1)");
+    console.error("usage: node jobs/pitch-lab-daily.js [daily|grade|report|mandate-review|review-history|snapshot] [--dry-run]   (requires PITCH_LAB_ENABLED=1)");
     process.exit(1);
   }
   const result = await jobs[task]({ dryRun: process.argv.includes("--dry-run") });

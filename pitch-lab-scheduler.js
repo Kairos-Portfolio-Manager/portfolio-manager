@@ -14,7 +14,7 @@
  *   18:40 Mon-Fri  daily pitches   (after the 17:15 scan and 17:30 peer-coverage refresh)
  *   after daily      grade matured pitches + send the digest (never races daily)
  *   10:00 Sat      weekly report -> report.json/html + published key for the website
- *   11:00 Sat (1st of month only)  monthly mandate review
+ *   11:00 Sat      weekly mandate review (after the report)
  */
 import "dotenv/config";
 import cron from "node-cron";
@@ -43,10 +43,10 @@ function guarded(name, job) {
 
 cron.schedule("40 18 * * 1-5", guarded("daily", () => runPitchLabDailyCycle()), TZ);
 cron.schedule("0 10 * * 6", guarded("report", () => runPitchLabReport()), TZ);
-// Monthly: first Saturday only (lib/pitch-lab/schedule.js — the same rule the website's
+// Weekly: every Saturday (lib/pitch-lab/schedule.js — the same rule the website's
 // "next review" date uses). Runs after the weekly report.
 cron.schedule("0 11 * * 6", guarded("mandate-review", () => {
-  if (!isMandateReviewDay(new Date())) { console.log("[PitchLabScheduler] mandate-review: not the first Saturday, skipping."); return Promise.resolve({ status: "skipped" }); }
+  if (!isMandateReviewDay(new Date())) { console.log("[PitchLabScheduler] mandate-review: not Saturday in New York, skipping."); return Promise.resolve({ status: "skipped" }); }
   return runPitchLabMandateReview();
 }), TZ);
 

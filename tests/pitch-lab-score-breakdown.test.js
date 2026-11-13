@@ -202,18 +202,19 @@ test("analysis keeps 1-10 and legacy 1-5 conviction apart and tests the Mandate 
 
 // --- review calendar ---------------------------------------------------------
 
-test("next review dates follow the scheduler's own first-Saturday rule, in ET across DST", () => {
+test("next review dates follow the scheduler's own every-Saturday rule, in ET across DST", () => {
   const wed = new Date("2026-11-04T15:00:00Z");
   assert.equal(nextMandateReviewAt(wed), "2026-11-07T16:00:00.000Z"); // 11:00 EST
   assert.equal(nextWeeklyReportAt(wed), "2026-11-07T15:00:00.000Z"); // 10:00 EST
   const afterReview = new Date("2026-11-07T16:30:00Z");
-  assert.equal(nextMandateReviewAt(afterReview), "2026-12-05T16:00:00.000Z");
+  assert.equal(nextMandateReviewAt(afterReview), "2026-11-14T16:00:00.000Z"); // the very next Saturday
   assert.equal(nextWeeklyReportAt(afterReview), "2026-11-14T15:00:00.000Z");
   assert.equal(nextMandateReviewAt(new Date("2026-10-01T12:00:00Z")), "2026-10-03T15:00:00.000Z"); // 11:00 EDT
   assert.equal(nextMandateReviewAt(new Date("2026-11-07T15:59:00Z")), "2026-11-07T16:00:00.000Z");
 
   assert.equal(isMandateReviewDay(new Date("2026-11-07T16:00:00Z")), true);
-  assert.equal(isMandateReviewDay(new Date("2026-11-14T16:00:00Z")), false); // second Saturday
+  assert.equal(isMandateReviewDay(new Date("2026-11-14T16:00:00Z")), true); // second Saturday: weekly now
+  assert.equal(isMandateReviewDay(new Date("2026-11-13T16:00:00Z")), false); // a Friday
   assert.equal(isMandateReviewDay(new Date("2026-11-07T03:00:00Z")), false); // still Friday in New York
   const scheduler = readFileSync(new URL("../pitch-lab-scheduler.js", import.meta.url), "utf8");
   assert.match(scheduler, /isMandateReviewDay\(/, "the scheduler must use the same rule the website shows");

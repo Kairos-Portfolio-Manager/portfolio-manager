@@ -115,10 +115,11 @@ test("a malformed block cannot create a recommendation alongside one good block"
 
 // ─── Finding 2: one identity per period and content ──────────────────────────
 
-test("reviewPeriod is the US Eastern calendar month", () => {
-  assert.equal(reviewPeriod(new Date("2026-11-01T03:00:00Z")), "2026-10"); // 23:00 ET on Oct 31
-  assert.equal(reviewPeriod(new Date("2026-11-01T06:00:00Z")), "2026-11");
-  assert.equal(generateMandateReview(makeReport(), agentScoring, { now: NOW }).period, "2026-10");
+test("reviewPeriod is the US Eastern calendar date (the review's Saturday)", () => {
+  assert.equal(reviewPeriod(new Date("2026-11-01T03:00:00Z")), "2026-10-31"); // 23:00 ET on Oct 31
+  assert.equal(reviewPeriod(new Date("2026-11-01T06:00:00Z")), "2026-11-01");
+  assert.equal(reviewPeriod(new Date("2026-11-14T16:00:00Z")), "2026-11-14");
+  assert.equal(generateMandateReview(makeReport(), agentScoring, { now: NOW }).period, "2026-10-03");
 });
 
 function fakePool() {
@@ -160,13 +161,13 @@ test("different content in the same period is a new row (a correction)", async (
   assert.equal(pool.rows.size, 2);
 });
 
-test("the store refuses a review without a YYYY-MM period", async () => {
+test("the store refuses a review without a YYYY-MM-DD period", async () => {
   const store = openPostgresPitchStore({ pool: fakePool() });
   const { period: _period, ...noPeriod } = generateMandateReview(makeReport(), agentScoring, { now: NOW });
   await assert.rejects(() => store.appendMandateReview(noPeriod), /period/);
 });
 
-test("running the monthly job twice stores one row and sends one Telegram digest", async () => {
+test("running the weekly job twice stores one row and sends one Telegram digest", async () => {
   const { pitches, outcomes } = generateDemoData({ now: new Date("2026-10-01T00:00:00Z") });
   const pool = fakePool();
   const store = { ...openPostgresPitchStore({ pool }), listPitches: async () => pitches, listOutcomes: async () => outcomes };
