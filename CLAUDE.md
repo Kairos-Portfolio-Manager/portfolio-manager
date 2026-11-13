@@ -6,6 +6,7 @@ AI portfolio research + execution backend. **Real money flows through this repo.
 
 - **Open system-loop findings → `ops/FIXLIST.md`** (auto-generated). At session start, skim "Needs attention" and judge whether anything there should be fixed as part of (or before) the current task — verify against live state first, findings are point-in-time. When you fix one, follow the status/regenerate steps in the file header.
 - Collaborating with another human or coding agent → `docs/AGENT-CONTEXT.md` (the shared, redacted project context; do not rely on Sam's private local vault).
+- Before classifying, implementing, reviewing, merging, or releasing shared work → `docs/CHANGE-GOVERNANCE.md`. State the owner, reviewer, integrator, and change tier before editing; an agent cannot independently lower the tier or approve its own diff.
 - New to the system → `docs/ONBOARDING.md` (mental models, proposal lifecycle, vocabulary).
 - Planning significant work → `docs/roadmaps/portfolio-master-plan.md` is the single north star: find the current unified phase, TRUST/SKILL label, gate, and reset rule there. Use `docs/roadmaps/AUTONOMY-ROADMAP.md` only for narrower TRUST implementation detail; the master plan wins on conflict.
 - Before ANY change → find your change type in `docs/CHANGE_MAP.md` (exact files + gotchas).
