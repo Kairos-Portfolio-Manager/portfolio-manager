@@ -45,6 +45,20 @@ the database schema. No `npm install`.
 
 ## Jetson steps
 
+**One command (recommended):** it runs every step below, with the stop checks, and asks
+for a `y` before changing anything.
+
+```bash
+ssh <you>@<jetson>
+cd ~/portfolio-manager && git fetch origin
+git show origin/mandate-v3:scripts/deploy-jetson-release.sh > /tmp/deploy-jetson-release.sh
+bash /tmp/deploy-jetson-release.sh <release SHA from Sam C>
+```
+
+(Run from `/tmp` because the script is not on the Jetson's checkout until this release lands.)
+It ends with a "Report for Sam C" block: send that back. The manual steps follow.
+
+
 ```bash
 ssh <you>@<jetson>
 cd ~/portfolio-manager
