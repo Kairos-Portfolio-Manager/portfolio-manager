@@ -5,9 +5,8 @@ to think against, not a gate. Steps can be reordered, skipped, or dropped as we
 learn. It does not override `docs/INVARIANTS.md` or the hard rules in
 `CLAUDE.md`, and it grants no trading authority.
 
-**Relationship to the other roadmaps:** `portfolio-master-plan.md` and
-`PM-REMAINING-PRIORITIES-2026-09-21.md` describe the three-agent, gate-heavy
-path. That path is paused, not deleted. Agents Two and Three are frozen
+**Relationship to the other roadmaps:** `portfolio-master-plan.md` describes
+the three-agent, gate-heavy path. That path is paused, not deleted. Agents Two and Three are frozen
 (`researchStatus: "frozen"` in `config/agents.js`, commit `054fce2`). Their
 data, lots, history, and mandates stay where they are.
 
