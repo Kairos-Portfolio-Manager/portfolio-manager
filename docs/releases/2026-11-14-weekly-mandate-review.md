@@ -1,6 +1,7 @@
 # Deploy: weekly Mandate Review + best/worst pitches (2026-11-14)
 
-**For:** whoever deploys the Jetson backend. **Approved by:** Sam (2026-11-13).
+**For:** Sam H (Jetson deploy). **Approved by:** Sam C (2026-11-13).
+**Release SHA:** the `mandate-v3` head after the `grading-system` merge PR lands. Sam C sends it.
 **Class:** Pitch Lab only. Paper only: nothing here touches proposals, approvals,
 signatures, the broker, the ledger or execution.
 
@@ -26,6 +27,19 @@ On top of the 2026-11-08 Pitch Lab scoring release (`cbb9a84`):
   date moves to the following Saturday right away.
 - Telegram review digest says "Weekly".
 
+**Also in this deploy: `grading-system` (live 0-100 mandate scorer, `e735838`)**
+
+- Each new pitch freezes its `mandateInputs` (metric vector, EDGAR derived bundle,
+  point-in-time consensus, industry-peer distributions) and a `mandateScore` 0-100
+  computed from them by the live scorer. Pitch schema **v4**; v3 pitches and the
+  peer-only /10 breakdown are untouched.
+- The daily run now reads consensus history (`consensus_snapshots`, migration `0009`,
+  already applied) per pitched ticker. A failed read is logged and those metrics score
+  as missing; it does not stop the run.
+- The weekly report analyses the 0-100 total as its own `mandateTotal` family. The
+  Mandate Review and the website do not use it yet (still the /10 score).
+- 13F inputs are not wired yet (follow-up).
+
 Not changed: `package.json`/lockfile, `server.js`, `scheduler.js`, any env var,
 the database schema. No `npm install`.
 
@@ -40,7 +54,8 @@ git fetch origin
 git log --oneline --first-parent HEAD..origin/mandate-v3
 ```
 
-**Stop check:** that list should show this release's merge, and possibly the
+**Stop check:** that list should show the `grading-system` merge, the weekly-review
+merge (`1068570`), and possibly the
 11-08 release merge (`cbb9a84`) if that was never deployed. Anything else older
 means the Jetson is further behind than this release assumes. **Stop and tell Sam.**
 
@@ -70,6 +85,15 @@ After Saturday 11:00 ET: `pm2 logs pitch-lab` shows `mandate-review finished`, a
 Telegram "Weekly Mandate Review" arrives, and the website's Mandate Review page
 lists "Week of Nov 14, 2026" with the next review on Nov 21.
 
+### Monday's first v4 pitch run (18:40 ET)
+
+```bash
+pm2 logs pitch-lab --lines 80 --nostream | grep -iE "consensus|mandate|error"
+```
+
+`consensus history unavailable for X` lines are expected for tickers without
+consensus rows (those metrics score as missing). Anything else erroring: tell Sam C.
+
 ## Dashboard
 
 Merge the `portfolio-dashboard` PR, then from a checkout with the sibling backend:
@@ -88,3 +112,9 @@ pm2 restart pitch-lab
 Weekly reviews already stored stay valid rows; the old code just won't run another
 until the first Saturday of the month. Its store check rejects `YYYY-MM-DD` periods,
 so do not run `mandate-review` manually on the old code.
+
+## Report back to Sam C
+
+The SHA you loaded (must equal the release SHA), the stop-check output, the PM2
+restart edge (N→N+1), `npm test` totals, `/health` output, and the `snapshot`
+task's output. After Saturday 11:00 ET: whether the review ran (`pm2 logs pitch-lab`).
