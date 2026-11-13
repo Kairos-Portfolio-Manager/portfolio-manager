@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-command Jetson deploy for a reviewed mandate-v3 release, with the stop checks built in.
 #
-#   cd ~/portfolio-manager && bash scripts/deploy-jetson-release.sh <release-sha>
+#   cd ~/portfolio-manager && bash /path/to/deploy-jetson-release.sh <release-sha>   (run from inside the checkout)
 #
 # <release-sha> is the mandate-v3 head Sam C approved (short or full). The script:
 #   1. refuses a dirty tree, an unexpected origin/mandate-v3 head, or a Jetson older than 40ee20b
@@ -15,7 +15,10 @@ set -euo pipefail
 BRANCH=mandate-v3
 FLOOR=40ee20b   # the oldest Jetson HEAD this release was written against
 EXPECTED="${1:-}"
-cd "$(dirname "$0")/.."
+# Deploy the checkout you are standing in (the script may be run from /tmp).
+REPO=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "STOP: run this from inside ~/portfolio-manager."; exit 1; }
+cd "$REPO"
+[ -f scripts/restart-with-pm2-deploy-marker.js ] || { echo "STOP: $REPO is not the portfolio-manager checkout."; exit 1; }
 LOG="${TMPDIR:-/tmp}/pm-deploy-test.log"
 
 die() { echo; echo "STOP: $*"; echo "Nothing was restarted. Send this output to Sam C."; exit 1; }
