@@ -92,6 +92,46 @@ test("the Mandate Score lens reads the supplied scores and skips unscored pitche
   assert.equal(m.lower.n, 4);
 });
 
+// ─── Regressions from the Codex review ───────────────────────────────────────
+
+const BIG_BAR = { minGraded: 30, minWeeks: 8 };
+/** n rows over 8 different ISO weeks. rating(i) and excess(i) give each row's rating and return. */
+function wide({ n, rating, excess }) {
+  const pitches = [];
+  const outcomes = [];
+  for (let i = 0; i < n; i += 1) {
+    const id = `w-${i}`;
+    pitches.push({ id, ticker: `W${i}`, conviction: rating(i), convictionScale: 10, pitchedAt: "2026-09-01T22:44:00.000Z" });
+    outcomes.push({ pitchId: id, horizonDays: 10, excessReturn: excess(i), entryDate: ["2026-09-07", "2026-09-14", "2026-09-21", "2026-09-28", "2026-10-05", "2026-10-12", "2026-10-19", "2026-10-26"][i % 8] });
+  }
+  return { pitches, outcomes };
+}
+const wideJudge = (input) => buildJudgment({ ...input, horizons: [10], evidenceBar: BIG_BAR, scoreOf: new Map() }).lenses.conviction.horizons["10"];
+
+test("Codex P1: enough evidence but every pitch at the same rating is 'no signal', never 'too early'", () => {
+  const b = wideJudge(wide({ n: 32, rating: () => 5, excess: () => 0.01 }));
+  assert.equal(b.enoughEvidence, true);
+  assert.equal(b.higher.n, 0);
+  assert.equal(b.verdict.label, "no_signal");
+  assert.match(b.verdict.detail, /barely vary/);
+});
+
+test("Codex P1: the verdict uses unrounded means, so display rounding cannot tip the 5 bp threshold", () => {
+  // lower-rated mean -0.000249, higher-rated mean 0.0002501: the true gap is 4.991 bp, below the 5 bp line.
+  // Rounded to 4 places these become -0.0002 and 0.0003, which would read as exactly 5 bp.
+  const b = wideJudge(wide({ n: 32, rating: (i) => (i < 16 ? 2 : 8), excess: (i) => (i < 16 ? -0.000249 : 0.0002501) }));
+  assert.equal(b.enoughEvidence, true);
+  assert.notEqual(b.verdict.label, "working_both_ways");
+  assert.equal(b.verdict.label, "no_signal");
+});
+
+test("Codex P2: means that overflow are unavailable, not a spurious 'no signal'", () => {
+  const b = wideJudge(wide({ n: 32, rating: (i) => (i < 16 ? 2 : 8), excess: (i) => (i < 16 ? -Number.MAX_VALUE : Number.MAX_VALUE) }));
+  assert.equal(b.spread, null);
+  assert.equal(b.verdict.label, "too_early");
+  assert.match(b.verdict.detail, /could not be computed/);
+});
+
 test("the snapshot carries the judgment block under the real evidence bar", () => {
   const input = build({ levels: [2, 6], perLevel: 2, excessFor: () => 0.01 });
   const snap = buildPitchLabSnapshot({ pitches: input.pitches, outcomes: input.outcomes, now: new Date("2026-10-26T12:00:00Z") });
