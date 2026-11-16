@@ -39,7 +39,7 @@ import { runDailyPitches } from "../lib/pitch-lab/daily-runner.js";
 import { buildPitchLabSnapshot } from "../lib/pitch-lab/dashboard-snapshot.js";
 import { gradeMaturedPitches } from "../lib/pitch-lab/grade-runner.js";
 import { renderReportHtml } from "../lib/pitch-lab/render-html.js";
-import { formatPitchLabDailyTelegram, formatPitchLabWeeklyTelegram, formatMandateReviewTelegram } from "../lib/pitch-lab/telegram.js";
+import { formatPitchLabDailyTelegram, formatPitchLabWeeklyTelegram, formatMandateReviewTelegram, splitTelegramMessage } from "../lib/pitch-lab/telegram.js";
 import { generateMandateReview } from "../lib/pitch-lab/mandate-review.js";
 import { AGENT_SCORING } from "../config/scoring/mandate-v2.js";
 import { defaultPitchLabDir } from "../lib/pitch-lab/store.js";
@@ -280,7 +280,8 @@ export async function runPitchLabGrade({
       failedTickers: result.failedTickers,
       gradingError,
     }),
-    { redis: cache, send },
+    // A four-pitch walk-through can pass Telegram's length limit: send it in whole parts.
+    { redis: cache, send: async (text) => { for (const part of splitTelegramMessage(text)) await (send ?? sendMessage)(part); } },
   );
   await refreshDashboardSnapshot({ pitches, outcomes, run, redis: cache, now });
   return { status: gradingError ? "partial" : "ok", ...result, gradingFailed: Boolean(gradingError), telegram: "daily_digest" };
