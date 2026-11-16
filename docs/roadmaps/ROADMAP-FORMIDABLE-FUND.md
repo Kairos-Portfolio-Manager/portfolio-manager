@@ -31,7 +31,6 @@ Frozen implementation authorities:
 - `docs/adr/0003-point-in-time-research-record.md` — append-only research record, comparison semantics, and selection modes.
 - `docs/adr/0004-strategy-proposal-lineage.md` — immutable strategy lineage and signature-v2 migration architecture.
 - `docs/BACKTEST-METHODOLOGY-v1.md` — point-in-time historical validation and promotion methodology.
-- `docs/executor-packets/README.md` — tasks ready for separate smaller-model execution.
 
 ---
 
