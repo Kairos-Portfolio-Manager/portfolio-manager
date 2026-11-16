@@ -153,6 +153,6 @@ switch (command) {
     break;
   }
   default:
-    console.log(readFileSync(new URL(import.meta.url), "utf8").split("\n").slice(2, 16).map((l) => l.replace(/^ \*\s?/, "")).join("\n"));
+    console.log(readFileSync(new URL(import.meta.url), "utf8").split("\n").slice(2, 17).map((l) => l.replace(/^ \*\s?/, "")).join("\n"));
     if (command) process.exitCode = 1;
 }

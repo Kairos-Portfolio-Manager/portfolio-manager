@@ -109,6 +109,13 @@ test("daily Pitch Lab message falls back honestly when a pitch has no 0-100 scor
   assert.match(message, /3\. BANK — no 0-100 mandate score: special sector not supported\nconviction 6\/10 · Mandate score unavailable \(no peer ranks\)/);
 });
 
+test("daily Pitch Lab message does not invent a worst metric when every scored metric did equally well", () => {
+  const even = scoredPitch("EVEN", 50, { revGrowth: metric(7.5, 15, 0.7), marginTrend: metric(6, 12, 0.7), balanceSheet: metric(5, 10, 0.7) });
+  const message = formatPitchLabDailyTelegram({ date: "2026-11-17", pitches: [even] });
+  assert.match(message, /Stands out: Revenue growth \(YoY\), 70th percentile, 7\.5\/15 pts\./);
+  assert.match(message, /Biggest risk: no single metric; every scored metric earned 50% of its points\./);
+});
+
 test("a long digest is split between blocks, never mid-line, and loses nothing", () => {
   const short = "one\n\ntwo";
   assert.deepEqual(splitTelegramMessage(short), [short]);

@@ -57,6 +57,25 @@ for those) — just things to come back to.
       document were redundant and were NOT used. Only the definitions above are new.
       This changed scoring, so per the master plan's reset rules it opens a new
       research cohort.
+- [ ] **MANDATE REVIEW v2 FOLLOW-UPS (built 2026-11-16: weekly matrix, bps adjustments,
+      Friday 19:40 ET run, spreadsheet export, new daily digest — see
+      `docs/releases/2026-11-20-mandate-review-v2.md`).** Still open:
+      1. **Website:** show `review.adjustments` and `review.weeklyMatrix` on the
+         `portfolio-dashboard` Mandate Review page, and a download for the export (needs a
+         server route or a published file; today the export is a file on the Jetson). Data
+         shape is in the release note.
+      2. **Range/threshold suggestions (Phase 2):** needs mean excess return by scoring
+         band in `lib/pitch-lab/analysis.js` first, a larger sample, and a report schema bump.
+      3. **More statistics:** overlap between metrics (partial correlation, so weight is not
+         double counted), out-of-sample scoring of frozen suggestions on later weeks, a
+         sector-neutral check column, signal decay across 5/10/20 days.
+      4. **Review vs daily run ordering:** the Friday review assumes the 18:40 daily cycle
+         has finished by 19:40. If it ever has not, that day's grades land in next week's
+         review. Consider checking the daily completion marker and alerting.
+      5. **Decide the defaults:** step cap +/-100 bps, 50 bps rounding, category totals
+         fixed, 60% of weeks agreeing for "recommended", 10-day results as the basis
+         (`ADJUSTMENT_RULES` in `lib/pitch-lab/mandate-adjustments.js`).
+
 - [ ] **MANDATE REVIEW: LET CONVICTION PERFORMANCE VS SPY INFORM THE SUGGESTIONS.**
       Part of the planned monthly Mandate Review (Pitch Lab report -> suggested mandate
       changes; suggestions only, never auto-applied). Conviction is the 1-5 rating Agent 1
