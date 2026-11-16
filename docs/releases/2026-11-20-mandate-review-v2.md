@@ -55,8 +55,8 @@ is not a hang), then `db:migrate` (a no-op here), the signed `deploy:restart`,
 `pm2 restart pitch-lab`, health and sysloop checks, and prints a report to send back.
 
 **`pm2 restart pitch-lab` is the step that matters for this release:** the review's new time
-is a cron line in that process. Until it restarts, the old Saturday 11:00 job would still
-fire (and on the new code would log "not the week's last trading day" and skip).
+is a cron line in that process. Until it restarts, the running process keeps the old code
+and the old Saturday 11:00 review.
 
 ### Checks after the restart
 
