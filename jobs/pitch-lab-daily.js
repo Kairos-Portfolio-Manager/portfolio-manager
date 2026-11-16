@@ -315,9 +315,9 @@ export async function runPitchLabReport({ env = process.env, now = () => new Dat
  * statistical report, run generateMandateReview, persist to Postgres (append-
  * only), publish to Redis for the website, and send one Telegram digest.
  *
- * Runs on the first Saturday of each month (the scheduler checks getDate() ≤ 7).
- * Idempotent within the month: the Postgres content-hash key deduplicates any
- * re-run with identical data.
+ * Runs weekly at 19:40 ET on the week's last trading day, one hour after that day's
+ * daily pitch + grade run (lib/pitch-lab/schedule.js is the one rule). Idempotent: the
+ * Postgres content-hash key deduplicates any re-run with identical data.
  *
  * This function never modifies the mandate config, creates a proposal, writes
  * to a ledger, or contacts a broker.
@@ -371,7 +371,7 @@ export async function runPitchLabMandateReview({ env = process.env, now = () => 
     { redis: cache, send },
   );
 
-  // Move the website's "next Mandate Review" date on to next Saturday now, not at
+  // Move the website's "next Mandate Review" date on to next week's review now, not at
   // Monday's grading run. Non-fatal, like every snapshot refresh.
   const snapshotPublished = await refreshSnapshotFromStore({ store: canonical, pitches: pitchRows, outcomes: outcomeRows, redis: cache, now });
 
@@ -381,7 +381,7 @@ export async function runPitchLabMandateReview({ env = process.env, now = () => 
 
 /**
  * Rebuild the website snapshot from Postgres outside the daily cycle (after a deploy,
- * after the Saturday review). Attaches the latest pitch day's run summary when Redis
+ * after the weekly review). Attaches the latest pitch day's run summary when Redis
  * still holds it, so the page's "latest run" status is not downgraded to unknown.
  */
 async function refreshSnapshotFromStore({ store, pitches, outcomes, redis, now }) {

@@ -13,14 +13,15 @@
  * Schedule (ET; the slots avoid the 18:00-20:20 production jobs' start times):
  *   18:40 Mon-Fri  daily pitches   (after the 17:15 scan and 17:30 peer-coverage refresh)
  *   after daily      grade matured pitches + send the digest (never races daily)
+ *   19:40 last trading day of the week (Fri, or earlier on a holiday week)
+ *                  weekly mandate review, one hour after that day's daily run
  *   10:00 Sat      weekly report -> report.json/html + published key for the website
- *   11:00 Sat      weekly mandate review (after the report)
  */
 import "dotenv/config";
 import cron from "node-cron";
 import { runPitchLabDailyCycle, runPitchLabReport, runPitchLabMandateReview, pitchLabEnabled } from "./jobs/pitch-lab-daily.js";
 import { sendMessage } from "./lib/telegram.js";
-import { isMandateReviewDay } from "./lib/pitch-lab/schedule.js";
+import { MANDATE_REVIEW_ET, isMandateReviewDay } from "./lib/pitch-lab/schedule.js";
 
 const TZ = { timezone: "America/New_York" };
 
@@ -43,10 +44,11 @@ function guarded(name, job) {
 
 cron.schedule("40 18 * * 1-5", guarded("daily", () => runPitchLabDailyCycle()), TZ);
 cron.schedule("0 10 * * 6", guarded("report", () => runPitchLabReport()), TZ);
-// Weekly: every Saturday (lib/pitch-lab/schedule.js — the same rule the website's
-// "next review" date uses). Runs after the weekly report.
-cron.schedule("0 11 * * 6", guarded("mandate-review", () => {
-  if (!isMandateReviewDay(new Date())) { console.log("[PitchLabScheduler] mandate-review: not Saturday in New York, skipping."); return Promise.resolve({ status: "skipped" }); }
+// Weekly, on the week's last trading day (lib/pitch-lab/schedule.js — the same rule the
+// website's "next review" date uses). The cron fires every weekday; the rule picks the day,
+// so a Friday market holiday moves the review to Thursday instead of skipping the week.
+cron.schedule(`${MANDATE_REVIEW_ET.minute} ${MANDATE_REVIEW_ET.hour} * * 1-5`, guarded("mandate-review", () => {
+  if (!isMandateReviewDay(new Date())) { console.log("[PitchLabScheduler] mandate-review: not the week's last trading day in New York, skipping."); return Promise.resolve({ status: "skipped" }); }
   return runPitchLabMandateReview();
 }), TZ);
 

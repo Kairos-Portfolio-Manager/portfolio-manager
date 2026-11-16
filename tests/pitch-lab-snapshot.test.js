@@ -132,7 +132,7 @@ test("every shown pitch carries its Mandate Score breakdown; recent pitches carr
 
 test("the snapshot tells the website when the next weekly report and Mandate Review run", () => {
   const s = buildPitchLabSnapshot({ pitches: [], outcomes: [], now: new Date("2026-11-04T15:00:00Z") });
-  assert.deepEqual(s.schedule, { nextWeeklyReportAt: "2026-11-07T15:00:00.000Z", nextMandateReviewAt: "2026-11-07T16:00:00.000Z" });
+  assert.deepEqual(s.schedule, { nextWeeklyReportAt: "2026-11-07T15:00:00.000Z", nextMandateReviewAt: "2026-11-07T00:40:00.000Z" });
 });
 
 test("malformed pitches are ignored, never thrown on", () => {
@@ -273,7 +273,7 @@ test("the manual snapshot task republishes from the store with the latest day's 
   assert.deepEqual([...writes.keys()], [PITCH_LAB_SNAPSHOT_KEY], "writes the one snapshot key and nothing else");
   const { snapshot } = JSON.parse(writes.get(PITCH_LAB_SNAPSHOT_KEY));
   assert.equal(snapshot.latest.status, "complete");
-  assert.equal(snapshot.schedule.nextMandateReviewAt, "2026-11-14T16:00:00.000Z");
+  assert.equal(snapshot.schedule.nextMandateReviewAt, "2026-11-14T00:40:00.000Z");
   assert.equal(snapshot.performers.best[0].ticker, "AAA");
   assert.equal((await runPitchLabSnapshot({ env: {}, store, redis })).status, "disabled");
 });

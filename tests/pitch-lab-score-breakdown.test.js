@@ -202,20 +202,28 @@ test("analysis keeps 1-10 and legacy 1-5 conviction apart and tests the Mandate 
 
 // --- review calendar ---------------------------------------------------------
 
-test("next review dates follow the scheduler's own every-Saturday rule, in ET across DST", () => {
+test("next review dates follow the scheduler's own rule (week's last trading day 19:40 ET; report Saturday 10:00), across DST", () => {
   const wed = new Date("2026-11-04T15:00:00Z");
-  assert.equal(nextMandateReviewAt(wed), "2026-11-07T16:00:00.000Z"); // 11:00 EST
-  assert.equal(nextWeeklyReportAt(wed), "2026-11-07T15:00:00.000Z"); // 10:00 EST
-  const afterReview = new Date("2026-11-07T16:30:00Z");
-  assert.equal(nextMandateReviewAt(afterReview), "2026-11-14T16:00:00.000Z"); // the very next Saturday
-  assert.equal(nextWeeklyReportAt(afterReview), "2026-11-14T15:00:00.000Z");
-  assert.equal(nextMandateReviewAt(new Date("2026-10-01T12:00:00Z")), "2026-10-03T15:00:00.000Z"); // 11:00 EDT
-  assert.equal(nextMandateReviewAt(new Date("2026-11-07T15:59:00Z")), "2026-11-07T16:00:00.000Z");
+  assert.equal(nextMandateReviewAt(wed), "2026-11-07T00:40:00.000Z"); // Friday 19:40 EST
+  assert.equal(nextWeeklyReportAt(wed), "2026-11-07T15:00:00.000Z"); // Saturday 10:00 EST
+  const afterReview = new Date("2026-11-07T01:00:00Z");
+  assert.equal(nextMandateReviewAt(afterReview), "2026-11-14T00:40:00.000Z"); // the very next Friday
+  assert.equal(nextWeeklyReportAt(new Date("2026-11-07T16:30:00Z")), "2026-11-14T15:00:00.000Z");
+  assert.equal(nextMandateReviewAt(new Date("2026-10-01T12:00:00Z")), "2026-10-02T23:40:00.000Z"); // Friday 19:40 EDT
+  assert.equal(nextMandateReviewAt(new Date("2026-11-07T00:39:00Z")), "2026-11-07T00:40:00.000Z");
+  // A Friday market holiday moves the review to Thursday instead of skipping the week.
+  assert.equal(nextMandateReviewAt(new Date("2026-12-21T12:00:00Z")), "2026-12-25T00:40:00.000Z"); // Thu Dec 24 (Christmas is Friday)
+  assert.equal(nextMandateReviewAt(new Date("2027-03-22T12:00:00Z")), "2027-03-25T23:40:00.000Z"); // Thu before Good Friday
 
-  assert.equal(isMandateReviewDay(new Date("2026-11-07T16:00:00Z")), true);
-  assert.equal(isMandateReviewDay(new Date("2026-11-14T16:00:00Z")), true); // second Saturday: weekly now
-  assert.equal(isMandateReviewDay(new Date("2026-11-13T16:00:00Z")), false); // a Friday
-  assert.equal(isMandateReviewDay(new Date("2026-11-07T03:00:00Z")), false); // still Friday in New York
+  assert.equal(isMandateReviewDay(new Date("2026-11-07T00:40:00Z")), true); // Friday evening in New York
+  assert.equal(isMandateReviewDay(new Date("2026-11-14T00:40:00Z")), true); // every week
+  assert.equal(isMandateReviewDay(new Date("2026-11-14T16:00:00Z")), false); // a Saturday: no longer the review day
+  assert.equal(isMandateReviewDay(new Date("2026-11-13T00:40:00Z")), false); // an ordinary Thursday
+  assert.equal(isMandateReviewDay(new Date("2026-12-25T00:40:00Z")), true); // Thursday before a Friday holiday
+  assert.equal(isMandateReviewDay(new Date("2026-12-26T00:40:00Z")), false); // the holiday Friday itself
   const scheduler = readFileSync(new URL("../pitch-lab-scheduler.js", import.meta.url), "utf8");
   assert.match(scheduler, /isMandateReviewDay\(/, "the scheduler must use the same rule the website shows");
+  assert.match(scheduler, /MANDATE_REVIEW_ET\.minute\} \$\{MANDATE_REVIEW_ET\.hour\} \* \* 1-5/, "the review cron takes its time from the shared rule");
+  assert.doesNotMatch(scheduler, /0 11 \* \* 6/, "the Saturday 11:00 review slot is gone");
+  assert.match(scheduler, /"0 10 \* \* 6"/, "the Saturday weekly report is unchanged");
 });
