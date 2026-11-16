@@ -33,7 +33,10 @@ Agent One ──► pitch record ──► Postgres pitch_lab_pitches      (appe
 | Model contract | `lib/pitch-lab/pitch-prompt.js` | Prompt + JSON schema for Agent One. The **model supplies only judgment** (conviction on a fixed rubric, rationale whose reasons cite metric ids). The **system supplies every number**, so the model cannot invent the data it is graded on. |
 | Grading | `lib/pitch-lab/grading.js` | Entry = first close after the pitch; exit = close N trading sessions later; success = return after round-trip costs **minus** the benchmark (SPY) over the same sessions. |
 | Analysis | `lib/pitch-lab/analysis.js` | Per time period × holding period: conviction and per-metric correlation factors with uncertainty. |
-| Schedule | `lib/pitch-lab/schedule.js` | Next weekly report (Sat 10:00 ET) and Mandate Review (every Saturday, 11:00 ET; weekly since 2026-11-14, period = that Saturday as YYYY-MM-DD — older reviews keep their YYYY-MM month). The snapshot also carries `performers`: best/worst 5 pitches by raw return over their longest matured holding period. |
+| Schedule | `lib/pitch-lab/schedule.js` | Next weekly report (Sat 10:00 ET) and Mandate Review (**19:40 ET on the week's last trading day**: Friday, or earlier when Friday is a market holiday; one hour after that day's 18:40 run. Period = that day as YYYY-MM-DD — reviews from 2026-11-14 carry their Saturday, older ones their YYYY-MM month). The snapshot also carries `performers`: best/worst 5 pitches by raw return over their longest matured holding period. |
+| Weekly matrix | `lib/pitch-lab/weekly-matrix.js` | Pure. The nine mandate metrics week by week (see "Weekly matrix"): per-week and aggregate correlation with excess return, weekly tally, consistency score, top-vs-bottom spread, and the weaker/stronger-than-the-others test. Carried on the report as `weeklyMatrix`. |
+| Review adjustments | `lib/pitch-lab/mandate-adjustments.js` | Pure. Turns the matrix into a suggested weight change in bps per metric (see "Mandate Review adjustments"). Never imports the mandate config; the weights are a parameter. |
+| Review export | `lib/pitch-lab/review-export.js`, `xlsx-writer.js`, `review-export-files.js` | The review as a spreadsheet: one `.xlsx` (dependency-free writer) plus a `.csv` per tab. Only `review-export-files.js` touches disk. |
 | Dashboard snapshot | `lib/pitch-lab/dashboard-snapshot.js` | Small `pitch-lab.snapshot.v2` payload for the website status page (schedule, recent pitches with excess returns, per-pitch Mandate Score breakdown, legacy conviction mixes). |
 | Review history | `lib/pitch-lab-review-publisher.js` | Publishes each Mandate Review to `pitchlab:mandate-review:<id>` plus the `pitchlab:mandate-reviews` index (CLI task `review-history`). `node jobs/pitch-lab-daily.js snapshot` republishes the website snapshot on demand. |
 | Statistics | `lib/pitch-lab/stats.js` | Spearman, clustered regression, cluster bootstrap, t-distribution, Benjamini–Hochberg. Pure, no dependencies. |
@@ -41,11 +44,11 @@ Agent One ──► pitch record ──► Postgres pitch_lab_pitches      (appe
 | Peer ranks | `lib/pitch-lab/peer-rank.js` | Pure. Ranks each of the 9 mandate metrics against the company's industry peers (see below). |
 | Peer bridge | `lib/pitch-lab-peer-bridge.js` | Reads `pm:peer-metrics` and (flag-gated) files peer-coverage requests. It is kept outside the pure analysis modules. |
 | Preview | `lib/pitch-lab/render-html.js` | Self-contained HTML view of a report. |
-| CLI | `scripts/pitch-lab.js` | `demo`, `record`, `grade`, `analyze`, `coverage`. |
+| CLI | `scripts/pitch-lab.js` | `demo`, `record`, `grade`, `analyze`, `coverage`, `review-export` (local store, or `--demo`). |
 | Selection | `lib/pitch-lab/selection.js` | Pure daily pick: 10 ranked + 5 random from Agent One's screened catalog; writes a per-date receipt. |
 | Daily runner | `lib/pitch-lab/daily-runner.js` | Orchestration with every dependency injected: draw → pitch each name → append. |
 | Grade runner | `lib/pitch-lab/grade-runner.js` | Grades matured pitches; shared by the CLI and the daily job. |
-| Jobs | `jobs/pitch-lab-daily.js` | Real wiring: budgeted model call, Telegram, catalog read. `daily` / `grade` / `report`. |
+| Jobs | `jobs/pitch-lab-daily.js` | Real wiring: budgeted model call, Telegram, catalog read. `daily` / `grade` / `report` / `mandate-review` / `review-history` / `snapshot` / `review-export` (spreadsheet from Postgres; reads only). |
 | Scheduler | `pitch-lab-scheduler.js` | Separate PM2 process with its own cron. |
 | Peer dry run | `scripts/pitch-lab-peer-check.js` | One-ticker check of peer coverage against the real peer table (run on the Jetson). Records nothing. |
 
@@ -128,8 +131,13 @@ its `peers` result to `buildPitch` / `pitchFromModelResponse`.
 
 ```
 18:40 ET Mon–Fri  pitch-lab-daily   draw 15 → fetch → peer ranks → model calls → append pitches → grade → one digest
+19:40 ET Fri*     mandate-review    analyse → weekly matrix → sized suggestions → store → publish → one weekly Telegram review
 10:00 ET Sat      pitch-lab-report  analyse → publish report → one weekly Telegram learning report
 ```
+
+\* The week's last trading day: Friday, or Thursday when Friday is a market holiday
+(`isMandateReviewDay`). It runs one hour after that day's daily cycle so the day's grades are in.
+Pitches made that evening enter on the next session, so they belong to the following week.
 
 Start it disabled from the repository directory with `PITCH_LAB_ENABLED=0` in the
 shared `.env`: `pm2 start pitch-lab-scheduler.js --name pitch-lab`. Do not pass
@@ -166,6 +174,36 @@ the shared `.env` remains authoritative.
 - **Why a separate process:** `scheduler.js` carries the Phase 0 safety schedule. Keeping Pitch Lab out of it
   means it cannot change that surface (tested: `scheduler.js` must not mention Pitch Lab). Deploying the new
   PM2 app is a separate, reviewed step — `npm run deploy:restart` only restarts `portfolio-manager`.
+
+### Daily digest (Telegram)
+
+Plain text, no emoji. After the header and the "Agent 1 made N paper pitches…" line it walks
+the **four pitches with the highest stored 0-100 mandate score** through all nine mandate
+metrics, one line each, in the mandate's order:
+
+```
+1. NET — mandate score 44/100
+Model conviction: 7/10
+Revenue beat vs consensus: no data, not scored
+Revenue growth (YoY): 67th percentile, 3.75/15 pts
+…
+Total: 27.75 of 63 available pts = 44/100 (5 of 9 metrics had data)
+Stands out: Forward P/E (lower = cheaper), 92nd percentile, 8/8 pts.
+Biggest risk: EPS trajectory (YoY), 67th percentile (just above the peer median), 4.5/18 pts.
+```
+
+- Every number comes from the `mandateScore` frozen on the pitch (`perMetric`); no model prose
+  is quoted. The model's own 1-10 conviction is one secondary line.
+- **Missing is never zero.** A metric without data says so and earns no points; the total shows
+  points earned of points available (the /100 score is that ratio, as the scorer defines it) and
+  how many of the nine metrics had data. A thin-peer cap is stated when it applied.
+- A metric scored on fixed bands (too few peers to rank) or blended says so instead of showing a
+  percentile it does not have.
+- "Stands out" is the metric with the highest share of its own points; "Biggest risk" the lowest
+  (ties go to the metric worth more points).
+- A pitch with no 0-100 score (older record, unsupported inputs) is listed after the scored ones
+  with the peer-only /10 line.
+- A digest over Telegram's length limit is sent in whole parts (`splitTelegramMessage`), never cut.
 
 ### Frozen launch evaluation contract
 
@@ -221,6 +259,89 @@ Rough scale: an effect as small as 0.5% per conviction point needs a few hundred
 graded pitches spread over months to show up. The per-month view will say
 "insufficient data" for a long time; that is correct, not a bug.
 
+## Weekly matrix
+
+`report.weeklyMatrix` (`pitch-lab.weekly-matrix.v1`), built by `weekly-matrix.js`. For each
+holding period: one row per mandate metric (always all nine), one column per **ISO week of
+entry** (the same week rule the analysis clusters on), then the aggregate.
+
+- **Cell** = Spearman correlation between the metric's industry-peer percentile and the pitch's
+  excess return vs the benchmark. The percentile is direction-adjusted, so **positive always means
+  the metric worked the way the mandate expects** (for lower-is-better metrics too).
+- **Aggregate** = the report's own all-time `peerMetrics` block (cluster bootstrap, BH q-value
+  across the nine). It is the only evidence that can create a suggestion.
+- **Weekly cells are descriptive.** A cell needs 10 usable pitches, else it is blank with its
+  count; `significant` only when its own interval excludes zero. Immature pitches are left out.
+- `weeksPositive` / `weeksNegative` / `weeksUsed`: the weekly tally.
+- `consistency.score`: mean weekly correlation ÷ its week-to-week standard deviation (needs 3
+  weeks). Higher = more reliable.
+- `spread`: mean excess return of the top fifth of pitches by the metric minus the bottom fifth
+  (`overall`, per week on each cell, and `meanWeekly` / `sdWeekly`). The spread should be large and
+  positive; its `sdWeekly` should be small.
+- `relative`: is the metric clearly weaker (`below_others`) or stronger (`above_others`) than the
+  other metrics? Whole weeks are resampled and the 95% interval of (its correlation − the median of
+  the others') must exclude zero. Withheld below the report's sample minimums.
+- Each week also carries `graded`, `meanExcessReturn` and `meanBenchmarkReturn` (the benchmark over
+  those pitches' own holding periods, not the calendar week).
+
+```
+weeklyMatrix: { version, options,
+  horizons: [ { horizonDays, graded, weekCount,
+    weeks: [ { week, weekStart, graded, meanExcessReturn, meanBenchmarkReturn } ],
+    metrics: [ { id, label,
+      cells: [ { week, n, rho, ci95, significant, spread } ],
+      aggregate: { n, weeks, rho, ci95, excessReturnPerSd, verdict },
+      weeksPositive, weeksNegative, weeksUsed,
+      consistency: { meanWeeklyRho, sdWeeklyRho, score },
+      spread: { overall, meanWeekly, sdWeekly, weeksUsed },
+      relative: { status, reason, difference, ci95, comparedWith } } ] } ] }
+```
+
+## Mandate Review adjustments
+
+The weekly review (`pitch-lab.mandate-review.v1`, additive fields) now carries:
+
+- `adjustments` — `mandate-adjustments.js` output, or `null` (insufficient data, or a report with no
+  matrix). One row per mandate metric, in mandate order:
+  `{ metricId, label, category, currentBps, changeBps, suggestedBps, direction, confidenceLabel, basis, evidence, reviewDirection?, wantedBps?, sized? }`
+  plus `horizonDays`, `rules`, `currentTotalBps`, `netChangeBps` (always 0) and `summary`.
+- `weeklyMatrix` — the matrix above, trimmed to the most recent 26 week columns (aggregates still
+  cover every week). The full matrix is on the report and in the export.
+
+Rules. **Suggestions only: nothing reads or writes the mandate config.**
+
+- 100 bps = 1 mandate point. Suggestions are read from the **10-day** results.
+- **The aggregate decides.** `more`: positive verdict with q ≤ 0.10. `less`: negative verdict with
+  q ≤ 0.10 (also `reviewDirection: true`: the metric is working backwards), **or** the metric is
+  `below_others` — clearly weaker than the other metrics even when none is strong — which is
+  capped at `watch`.
+- **Weeks set the confidence, never the direction.** `recommended` when at least 3 weeks have a
+  correlation and 60% of them agree with the aggregate; otherwise `watch`. One bad week does not
+  downgrade a metric. A change is actionable from the first review that shows it.
+- **Size:** 100 bps when recommended, 50 bps when watch; never more than 100 bps a review, always a
+  multiple of 50, never below zero.
+- **The mandate stays at 100 points and each category keeps its total.** A move is paired inside
+  its category: first against opposite suggestions, then against metrics with enough data and no
+  clear effect (`direction: "offset"`). Metrics with no data or too little data are never the other
+  side. A move with nothing to pair against is reported with `sized: "not_sized"` and 0 bps.
+- **Relative to the live weights**, not stacked on an earlier review: an unapplied suggestion simply
+  shows again.
+- The original `metrics[]` verdicts (raw metric values, across horizons) are unchanged. The
+  adjustments use the peer percentile because that is what the mandate scores on.
+
+The Telegram review ends with one line per metric (`Revenue growth (YoY): +100 bps, recommended
+(went with better results; corr +0.19, positive 8 of 10 weeks)`).
+
+**Spreadsheet:** `node jobs/pitch-lab-daily.js review-export` (Jetson, from Postgres) or
+`npm run pitch-lab -- review-export [--demo]` (local) writes
+`data/pitch-lab/review-export/mandate-review-<period>.xlsx` and a `.csv` per tab: Summary,
+Adjustments, Matrix and Spread for each holding period, and Pitches (the per-pitch percentiles and
+returns everything else is computed from). It stores no review and sends nothing.
+
+Not built: range/threshold suggestions (needs returns by scoring band first), overlap between
+metrics (partial correlation), out-of-sample scoring of frozen suggestions, and a sector-neutral
+check column.
+
 ## Report contract (what the website reads)
 
 `report.json`, `schemaVersion: "pitch-lab.report.v3"` (v2 added `peerMetrics` per horizon and `dataCoverage`; v3 analyses conviction one scale at a time — `conviction` is the 1–10 cohort, `convictionLegacy` the old 1–5 pitches, never mixed — and adds `mandateScore` and per-horizon `clusters`; pitch records are `pitch-lab.pitch.v3`):
@@ -245,7 +366,8 @@ graded pitches spread over months to show up. The per-month view will say
     } ] } ],
   dataCoverage: { pitches, pitchesWithPeerData, peerSetLevel, peerSetMode, peerSetReason,
     peerRankStatus: { [metricId]: { ranked, thin_peers, no_peers, missing_value, peer_data_unavailable, not_recorded, rankedShare } },
-    missingReasons: { [featureId]: { present, missing: { [reason]: n } } } } }
+    missingReasons: { [featureId]: { present, missing: { [reason]: n } } } },
+  weeklyMatrix: { ...see "Weekly matrix" } }
 ```
 
 Returns are decimals (0.012 = 1.2%). A website must show the `isSyntheticDemo`
