@@ -41,6 +41,7 @@ import { gradeMaturedPitches } from "../lib/pitch-lab/grade-runner.js";
 import { renderReportHtml } from "../lib/pitch-lab/render-html.js";
 import { formatPitchLabDailyTelegram, formatPitchLabWeeklyTelegram, formatMandateReviewTelegram, splitTelegramMessage } from "../lib/pitch-lab/telegram.js";
 import { generateMandateReview } from "../lib/pitch-lab/mandate-review.js";
+import { writeReviewExport } from "../lib/pitch-lab/review-export-files.js";
 import { AGENT_SCORING } from "../config/scoring/mandate-v2.js";
 import { defaultPitchLabDir } from "../lib/pitch-lab/store.js";
 import { openPostgresPitchStore } from "../lib/pg/pitch-lab-store.js";
@@ -440,6 +441,22 @@ export async function runPitchLabReviewHistory({ env = process.env, now = () => 
   return { status: published ? "ok" : "failed", published };
 }
 
+/**
+ * Manual only: write the Mandate Review as a spreadsheet (.xlsx + one .csv per tab) under
+ * the Pitch Lab data directory, from the canonical Postgres records. Reads only; it stores
+ * no review, publishes nothing and sends no Telegram message.
+ */
+export async function runPitchLabReviewExport({ env = process.env, now = () => new Date(), store, pool, outDir } = {}) {
+  if (!pitchLabEnabled(env)) return { status: "disabled" };
+  const canonical = store ?? openPostgresPitchStore({ pool });
+  const [pitchRows, outcomeRows] = await Promise.all([canonical.listPitches(), canonical.listOutcomes()]);
+  const report = analyzePitchLab({ pitches: pitchRows, outcomes: outcomeRows, now: now() });
+  const review = generateMandateReview(report, AGENT_SCORING[AGENT_ID], { now: now(), agentId: AGENT_ID });
+  const written = writeReviewExport({ review, report, pitches: pitchRows, outcomes: outcomeRows, outDir: outDir ?? path.join(defaultPitchLabDir(env), "review-export") });
+  console.log(`[PitchLab] Mandate Review export written: ${written.xlsxPath}`);
+  return { status: "ok", reviewStatus: review.status, pitches: pitchRows.length, ...written };
+}
+
 /** The scheduler's atomic daily unit: finish all pitches, then grade and notify. */
 export async function runPitchLabDailyCycle({ runDaily = runPitchLabDaily, runGrade = runPitchLabGrade } = {}) {
   const daily = await runDaily();
@@ -455,12 +472,12 @@ export async function runPitchLabDailyCycle({ runDaily = runPitchLabDaily, runGr
   return { ...daily, grade: gradeResult, status: gradeResult.status === "ok" ? daily.status : gradeResult.status };
 }
 
-// Manual run: `node jobs/pitch-lab-daily.js [daily|grade|report|mandate-review|review-history|snapshot] [--dry-run]`
+// Manual run: `node jobs/pitch-lab-daily.js [daily|grade|report|mandate-review|review-history|snapshot|review-export] [--dry-run]`
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
   const [task = "daily"] = process.argv.slice(2).filter((a) => !a.startsWith("--"));
-  const jobs = { daily: runPitchLabDaily, grade: runPitchLabGrade, report: runPitchLabReport, "mandate-review": runPitchLabMandateReview, "review-history": runPitchLabReviewHistory, snapshot: runPitchLabSnapshot };
+  const jobs = { daily: runPitchLabDaily, grade: runPitchLabGrade, report: runPitchLabReport, "mandate-review": runPitchLabMandateReview, "review-history": runPitchLabReviewHistory, snapshot: runPitchLabSnapshot, "review-export": runPitchLabReviewExport };
   if (!jobs[task]) {
-    console.error("usage: node jobs/pitch-lab-daily.js [daily|grade|report|mandate-review|review-history|snapshot] [--dry-run]   (requires PITCH_LAB_ENABLED=1)");
+    console.error("usage: node jobs/pitch-lab-daily.js [daily|grade|report|mandate-review|review-history|snapshot|review-export] [--dry-run]   (requires PITCH_LAB_ENABLED=1)");
     process.exit(1);
   }
   const result = await jobs[task]({ dryRun: process.argv.includes("--dry-run") });

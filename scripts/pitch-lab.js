@@ -8,6 +8,9 @@
  *   npm run pitch-lab -- grade                fetch prices, grade every pitch that has matured
  *   npm run pitch-lab -- analyze              build report.json + report.html from stored data
  *   npm run pitch-lab -- coverage             fill rates: how often each metric was peer-ranked, and why not
+ *   npm run pitch-lab -- review-export        Mandate Review as a spreadsheet (.xlsx + .csv per tab) from stored
+ *                                             data; add --demo for synthetic data. On the Jetson (Postgres) use
+ *                                             `node jobs/pitch-lab-daily.js review-export`.
  *   node scripts/pitch-lab-peer-check.js NET  dry run of the peer ranking for one ticker (needs Redis env)
  *
  * Options: --dir=<path> (default $PITCH_LAB_DIR or ./data/pitch-lab)
@@ -22,6 +25,9 @@ import { gradeMaturedPitches } from "../lib/pitch-lab/grade-runner.js";
 import { PitchValidationError } from "../lib/pitch-lab/pitch.js";
 import { renderReportHtml } from "../lib/pitch-lab/render-html.js";
 import { defaultPitchLabDir, openPitchStore } from "../lib/pitch-lab/store.js";
+import { generateMandateReview } from "../lib/pitch-lab/mandate-review.js";
+import { writeReviewExport } from "../lib/pitch-lab/review-export-files.js";
+import { AGENT_SCORING } from "../config/scoring/mandate-v2.js";
 
 const args = process.argv.slice(2);
 const command = args.find((a) => !a.startsWith("--"));
@@ -134,7 +140,19 @@ switch (command) {
     }
     break;
   }
+  case "review-export": {
+    // Read-only on the mandate: the weights are passed to the review, never written.
+    const demo = args.includes("--demo");
+    const { pitches, outcomes } = demo ? generateDemoData({ horizons }) : (() => { const store = openPitchStore(dir); return { pitches: store.listPitches(), outcomes: store.listOutcomes() }; })();
+    const report = analyzePitchLab({ pitches, outcomes, horizons });
+    const review = generateMandateReview(report, AGENT_SCORING["agent-1"], { agentId: "agent-1" });
+    const written = writeReviewExport({ review, report, pitches, outcomes, outDir: path.resolve(flag("out", path.join(dir, demo ? "demo" : "", "review-export"))) });
+    console.log(`\nMandate Review export — ${review.status}${report.isSyntheticDemo ? " (SYNTHETIC DEMO DATA)" : ""}, ${pitches.length} pitches`);
+    console.log(`  tabs: ${written.sheets.join(", ")}`);
+    console.log(`\nWrote ${written.xlsxPath}\n      ${written.csvPaths.length} CSV files alongside it`);
+    break;
+  }
   default:
-    console.log(readFileSync(new URL(import.meta.url), "utf8").split("\n").slice(2, 13).map((l) => l.replace(/^ \*\s?/, "")).join("\n"));
+    console.log(readFileSync(new URL(import.meta.url), "utf8").split("\n").slice(2, 16).map((l) => l.replace(/^ \*\s?/, "")).join("\n"));
     if (command) process.exitCode = 1;
 }
