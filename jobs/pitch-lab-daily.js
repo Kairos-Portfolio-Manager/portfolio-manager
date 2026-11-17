@@ -42,6 +42,9 @@ import { renderReportHtml } from "../lib/pitch-lab/render-html.js";
 import { formatPitchLabDailyTelegram, formatPitchLabWeeklyTelegram, formatMandateReviewTelegram, splitTelegramMessage } from "../lib/pitch-lab/telegram.js";
 import { generateMandateReview } from "../lib/pitch-lab/mandate-review.js";
 import { writeReviewExport } from "../lib/pitch-lab/review-export-files.js";
+import { DEFAULT_CONSENSUS_PLAN, planConsensusCollection } from "../lib/pitch-lab/consensus-plan.js";
+import { rankedAgentOnePool } from "../lib/pitch-lab/selection.js";
+import { consensusSnapshotRow } from "../lib/consensus-snapshot.js";
 import { AGENT_SCORING } from "../config/scoring/mandate-v2.js";
 import { defaultPitchLabDir } from "../lib/pitch-lab/store.js";
 import { openPostgresPitchStore } from "../lib/pg/pitch-lab-store.js";
@@ -312,6 +315,19 @@ export async function runPitchLabReport({ env = process.env, now = () => new Dat
 }
 
 /**
+ * The agent's mandate weights read fresh from config/scoring/mandate-v2.js (a new module
+ * instance, so an edit made since this process started is seen), and whether they differ
+ * from the copy this process loaded at start-up. Read-only.
+ */
+export async function currentAgentScoring({ agentId = AGENT_ID, loaded = AGENT_SCORING[agentId], importFresh } = {}) {
+  const load = importFresh ?? (() => import(`../config/scoring/mandate-v2.js?fresh=${Date.now()}`));
+  const scoring = (await load()).AGENT_SCORING?.[agentId];
+  if (!scoring?.categories) throw new Error(`no mandate scoring config for ${agentId} on disk — refusing to review against unknown weights`);
+  const weights = (config) => JSON.stringify(Object.entries(config?.categories ?? {}).map(([id, category]) => [id, category.maxPoints, Object.entries(category.metrics ?? {}).map(([metricId, spec]) => [metricId, spec.points, spec.higherIsBetter !== false])]));
+  return { scoring, stale: weights(scoring) !== weights(loaded) };
+}
+
+/**
  * Weekly Mandate Review: load pitches + outcomes from Postgres, derive the
  * statistical report, run generateMandateReview, persist to Postgres (append-
  * only), publish to Redis for the website, and send one Telegram digest.
@@ -323,14 +339,22 @@ export async function runPitchLabReport({ env = process.env, now = () => new Dat
  * This function never modifies the mandate config, creates a proposal, writes
  * to a ledger, or contacts a broker.
  */
-export async function runPitchLabMandateReview({ env = process.env, now = () => new Date(), store, pool, redis, send } = {}) {
+export async function runPitchLabMandateReview({ env = process.env, now = () => new Date(), store, pool, redis, send, loadScoring = currentAgentScoring } = {}) {
   if (!pitchLabEnabled(env)) return { status: "disabled" };
   const canonical = store ?? openPostgresPitchStore({ pool });
   const [pitchRows, outcomeRows] = await Promise.all([canonical.listPitches(), canonical.listOutcomes()]);
   const report = analyzePitchLab({ pitches: pitchRows, outcomes: outcomeRows, now: now() });
+  // Always size suggestions against the mandate as it is on disk NOW, not as it was when
+  // this long-running process started.
+  const { scoring, stale } = await loadScoring();
+  if (stale) {
+    const warning = "Pitch Lab is running with older mandate weights than config/scoring/mandate-v2.js on disk. This review used the file's current weights, but new pitches are still being scored with the old ones: run `pm2 restart pitch-lab`.";
+    console.error(`[PitchLab] ${warning}`);
+    try { await (send ?? sendMessage)(`🚨 ${warning}`); } catch (_) {}
+  }
   let review;
   try {
-    review = generateMandateReview(report, AGENT_SCORING[AGENT_ID], { now: now(), agentId: AGENT_ID });
+    review = generateMandateReview(report, scoring, { now: now(), agentId: AGENT_ID });
   } catch (error) {
     console.error(`[PitchLab] Mandate Review generation failed: ${error.message}`);
     try { await sendMessage(`🚨 Pitch Lab Mandate Review generation failed: ${String(error?.message ?? error).slice(0, 300)}`); } catch (_) {}
@@ -446,15 +470,91 @@ export async function runPitchLabReviewHistory({ env = process.env, now = () => 
  * the Pitch Lab data directory, from the canonical Postgres records. Reads only; it stores
  * no review, publishes nothing and sends no Telegram message.
  */
-export async function runPitchLabReviewExport({ env = process.env, now = () => new Date(), store, pool, outDir } = {}) {
+export async function runPitchLabReviewExport({ env = process.env, now = () => new Date(), store, pool, outDir, loadScoring = currentAgentScoring } = {}) {
   if (!pitchLabEnabled(env)) return { status: "disabled" };
   const canonical = store ?? openPostgresPitchStore({ pool });
   const [pitchRows, outcomeRows] = await Promise.all([canonical.listPitches(), canonical.listOutcomes()]);
   const report = analyzePitchLab({ pitches: pitchRows, outcomes: outcomeRows, now: now() });
-  const review = generateMandateReview(report, AGENT_SCORING[AGENT_ID], { now: now(), agentId: AGENT_ID });
+  const review = generateMandateReview(report, (await loadScoring()).scoring, { now: now(), agentId: AGENT_ID });
   const written = writeReviewExport({ review, report, pitches: pitchRows, outcomes: outcomeRows, outDir: outDir ?? path.join(defaultPitchLabDir(env), "review-export") });
   console.log(`[PitchLab] Mandate Review export written: ${written.xlsxPath}`);
   return { status: "ok", reviewStatus: review.status, pitches: pitchRows.length, ...written };
+}
+
+export const consensusCollectEnabled = (env = process.env) => env.PITCH_LAB_CONSENSUS_COLLECT?.trim() === "1";
+
+/**
+ * Daily consensus collection for the pool Agent One pitches from (lib/pitch-lab/consensus-plan.js
+ * explains why). Appends observations to the same durable, append-only consensus history the
+ * universe and peer jobs already write (consensus_snapshots), through the same row builder, so
+ * estimate revisions and revenue beat have history behind them by the time a name is pitched.
+ *
+ * Research data only: no model call, no proposal, no order path. Off unless
+ * PITCH_LAB_CONSENSUS_COLLECT=1. One unavailable ticker never stops the pass; a failed write
+ * is loud. Rows are checkpointed so an interrupted pass keeps what it collected.
+ */
+export async function runPitchLabConsensusCollect({
+  env = process.env,
+  now = () => new Date(),
+  pool,
+  getCatalog = getUniverseCatalog,
+  getConsensusTrend,
+  readLatest,
+  saveSnapshots,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  limit = Math.floor(positive(env.PITCH_LAB_CONSENSUS_LIMIT, DEFAULT_CONSENSUS_PLAN.limit)),
+  paceMs = 300,
+  checkpoint = 25,
+} = {}) {
+  if (!pitchLabEnabled(env)) return { status: "disabled" };
+  if (!consensusCollectEnabled(env)) return { status: "disabled", reason: "PITCH_LAB_CONSENSUS_COLLECT is not 1" };
+  const store = await import("../lib/pg/consensus-snapshots.js");
+  if (!saveSnapshots && !store.consensusStoreConfigured({ pool })) throw new Error("DATABASE_URL is required to collect consensus history.");
+  const fetchTrend = getConsensusTrend ?? (await import("../lib/yahoo.js")).fetchConsensusTrend;
+  const latest = readLatest ?? ((args) => store.readLatestConsensusTimes(args, { pool }));
+  const save = saveSnapshots ?? ((rows) => store.writeConsensusSnapshots(rows, { pool }));
+
+  const catalog = await getCatalog();
+  if (!catalog || !Object.keys(catalog).length) throw new Error("universe catalog unavailable — no consensus collected");
+  const ranked = rankedAgentOnePool({ catalog, riskLimits: loadRiskLimits() }).map((candidate) => candidate.ticker);
+  const plan = planConsensusCollection({ rankedTickers: ranked, lastSeen: await latest({ tickers: ranked }), now: now(), limit });
+
+  const summary = { status: "ok", poolSize: plan.poolSize, planned: plan.tickers.length, alreadyFresh: plan.fresh, neverSeen: plan.neverSeen, observed: 0, stored: 0, unavailable: 0, writeFailures: 0, daysToCoverPool: plan.daysToCoverPool };
+  let batch = [];
+  const flush = async () => {
+    if (!batch.length) return;
+    const rows = batch;
+    batch = [];
+    try {
+      summary.stored += (await save(rows)).inserted ?? 0;
+    } catch (error) {
+      summary.writeFailures += rows.length;
+      summary.status = "partial";
+      console.error(`[PitchLab] consensus snapshot write FAILED (${rows.length} observations lost): ${error?.message ?? error}`);
+    }
+  };
+  for (const [index, ticker] of plan.tickers.entries()) {
+    if (index > 0) await sleep(paceMs);
+    try {
+      const trend = await fetchTrend(ticker);
+      const row = trend ? consensusSnapshotRow({ ...trend, ticker }, { now }) : null;
+      if (row) {
+        batch.push(row);
+        summary.observed += 1;
+      } else summary.unavailable += 1;
+    } catch (error) {
+      summary.unavailable += 1;
+      console.warn(`[PitchLab] ${ticker} consensus unavailable: ${error?.message ?? error}`);
+    }
+    if (batch.length >= checkpoint) await flush();
+  }
+  await flush();
+  // Every write failing is a broken collector, not a quiet day: fail the job so the scheduler pages.
+  if (summary.observed > 0 && summary.stored === 0 && summary.writeFailures === summary.observed) {
+    throw new Error(`consensus collection stored nothing: all ${summary.observed} observations failed to write`);
+  }
+  console.log(`[PitchLab] consensus collect: ${summary.observed}/${summary.planned} observed, ${summary.stored} stored, ${summary.unavailable} unavailable, pool ${summary.poolSize} (${summary.neverSeen} never observed before this run, ~${summary.daysToCoverPool} days per full pass)`);
+  return summary;
 }
 
 /** The scheduler's atomic daily unit: finish all pitches, then grade and notify. */
@@ -472,12 +572,12 @@ export async function runPitchLabDailyCycle({ runDaily = runPitchLabDaily, runGr
   return { ...daily, grade: gradeResult, status: gradeResult.status === "ok" ? daily.status : gradeResult.status };
 }
 
-// Manual run: `node jobs/pitch-lab-daily.js [daily|grade|report|mandate-review|review-history|snapshot|review-export] [--dry-run]`
+// Manual run: `node jobs/pitch-lab-daily.js [daily|grade|report|mandate-review|review-history|snapshot|review-export|consensus-collect] [--dry-run]`
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
   const [task = "daily"] = process.argv.slice(2).filter((a) => !a.startsWith("--"));
-  const jobs = { daily: runPitchLabDaily, grade: runPitchLabGrade, report: runPitchLabReport, "mandate-review": runPitchLabMandateReview, "review-history": runPitchLabReviewHistory, snapshot: runPitchLabSnapshot, "review-export": runPitchLabReviewExport };
+  const jobs = { daily: runPitchLabDaily, grade: runPitchLabGrade, report: runPitchLabReport, "mandate-review": runPitchLabMandateReview, "review-history": runPitchLabReviewHistory, snapshot: runPitchLabSnapshot, "review-export": runPitchLabReviewExport, "consensus-collect": runPitchLabConsensusCollect };
   if (!jobs[task]) {
-    console.error("usage: node jobs/pitch-lab-daily.js [daily|grade|report|mandate-review|review-history|snapshot|review-export] [--dry-run]   (requires PITCH_LAB_ENABLED=1)");
+    console.error("usage: node jobs/pitch-lab-daily.js [daily|grade|report|mandate-review|review-history|snapshot|review-export|consensus-collect] [--dry-run]   (requires PITCH_LAB_ENABLED=1)");
     process.exit(1);
   }
   const result = await jobs[task]({ dryRun: process.argv.includes("--dry-run") });

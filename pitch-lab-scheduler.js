@@ -11,6 +11,7 @@
  * With PITCH_LAB_ENABLED unset the process idles and every job reports "disabled".
  *
  * Schedule (ET; the slots avoid the 18:00-20:20 production jobs' start times):
+ *   07:10 Mon-Fri  consensus collection for Agent One's pool (only with PITCH_LAB_CONSENSUS_COLLECT=1)
  *   18:40 Mon-Fri  daily pitches   (after the 17:15 scan and 17:30 peer-coverage refresh)
  *   after daily      grade matured pitches + send the digest (never races daily)
  *   19:40 last trading day of the week (Fri, or earlier on a holiday week)
@@ -19,7 +20,7 @@
  */
 import "dotenv/config";
 import cron from "node-cron";
-import { runPitchLabDailyCycle, runPitchLabReport, runPitchLabMandateReview, pitchLabEnabled } from "./jobs/pitch-lab-daily.js";
+import { runPitchLabDailyCycle, runPitchLabReport, runPitchLabMandateReview, runPitchLabConsensusCollect, pitchLabEnabled } from "./jobs/pitch-lab-daily.js";
 import { sendMessage } from "./lib/telegram.js";
 import { MANDATE_REVIEW_ET, isMandateReviewDay } from "./lib/pitch-lab/schedule.js";
 
@@ -42,6 +43,9 @@ function guarded(name, job) {
   };
 }
 
+// Before the open, clear of every production job's start time. Reports "disabled" unless
+// PITCH_LAB_CONSENSUS_COLLECT=1.
+cron.schedule("10 7 * * 1-5", guarded("consensus-collect", () => runPitchLabConsensusCollect()), TZ);
 cron.schedule("40 18 * * 1-5", guarded("daily", () => runPitchLabDailyCycle()), TZ);
 cron.schedule("0 10 * * 6", guarded("report", () => runPitchLabReport()), TZ);
 // Weekly, on the week's last trading day (lib/pitch-lab/schedule.js — the same rule the
