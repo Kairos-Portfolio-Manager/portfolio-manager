@@ -57,6 +57,20 @@ for those) — just things to come back to.
       document were redundant and were NOT used. Only the definitions above are new.
       This changed scoring, so per the master plan's reset rules it opens a new
       research cohort.
+- [ ] **13F INGESTION (the last two always-empty mandate metrics, 15 of 100 points).**
+      `instOwnershipDir` and `thirteenF` are "no data" on every pitch: the maths is written
+      (`lib/thirteen-f.js`, `lib/thirteen-f-dataset.js`, `lib/cusip-map.js`) but nothing
+      downloads the SEC quarterly 13F data sets or maps tickers to CUSIPs. To build:
+      1. Confirm both hosts from the Jetson (the two `curl` checks in the item below).
+      2. A quarterly job: download the data set zip, stream `INFOTABLE.tsv` (hundreds of MB:
+         it cannot be read as one string; `aggregateSharesByCusip` takes text today), keep
+         only CUSIPs in the catalog, store per-ticker quarters (new table + migration).
+      3. Ticker -> CUSIP via OpenFIGI if reachable, else derive from SEC filings.
+      4. Hand the result to `assembleMandateInputs({ thirteenF })` in Pitch Lab and the live
+         scorer; match shares outstanding to each quarter's own period end (denominator hazard
+         documented in `lib/thirteen-f.js`).
+      Scoring coverage changes in the live scorer too, so it ships as a declared research release.
+
 - [ ] **MANDATE REVIEW v2 FOLLOW-UPS (built 2026-11-16: weekly matrix, bps adjustments,
       Friday 19:40 ET run, spreadsheet export, new daily digest — see
       `docs/releases/2026-11-20-mandate-review-v2.md`).** Still open:

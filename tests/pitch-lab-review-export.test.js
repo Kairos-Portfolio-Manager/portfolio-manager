@@ -93,9 +93,12 @@ const sheetOf = (sheets, name) => sheets.find((sheet) => sheet.name === name);
 test("the export has a tab for the summary, the adjustments, each holding period's matrix and spread, and the pitches", () => {
   const sheets = buildReviewExport({ review, report, ...data });
   // The review's own holding period (10 days) comes first.
-  assert.deepEqual(sheets.map((sheet) => sheet.name), ["Summary", "Adjustments", "Matrix 10d", "Matrix 5d", "Spread 10d", "Spread 5d", "Pitches"]);
+  assert.deepEqual(sheets.map((sheet) => sheet.name), ["Summary", "Adjustments", "Change request", "Metric ideas", "Matrix 10d", "Matrix 5d", "Spread 10d", "Spread 5d", "Pitches"]);
   const summary = sheetOf(sheets, "Summary").rows;
   assert.deepEqual(summary.find((row) => row[0] === "Review period"), ["Review period", "2026-03-13"]);
+  assert.ok(summary.some((row) => row[0] === "Mandate weights used" && /A\.revBeat=10/.test(row[1])));
+  assert.match(sheetOf(sheets, "Change request").rows[0][0], /^Mandate weight change request — from the Pitch Lab Mandate Review of 2026-03-13/);
+  assert.match(sheetOf(sheets, "Metric ideas").rows[0][0], /soft suggestions/);
   assert.ok(summary.some((row) => /no mandate change has been made/.test(row[0] ?? "")));
   assert.ok(summary.some((row) => row[0] === "Caveats"));
   assert.doesNotThrow(() => buildXlsx(sheets));
@@ -119,11 +122,11 @@ test("the matrix and spread tabs carry the report's numbers unchanged, one colum
   const horizon = report.weeklyMatrix.horizons.find((h) => h.horizonDays === 10);
   const matrix = sheetOf(sheets, "Matrix 10d").rows;
   assert.deepEqual(matrix[1].slice(0, 4), ["Metric", "2026-01-05", "2026-01-12", "2026-01-19"]);
-  assert.equal(matrix[1].length, 1 + horizon.weeks.length + 7);
+  assert.equal(matrix[1].length, 1 + horizon.weeks.length + 8);
   const source = horizon.metrics.find((m) => m.id === "revGrowth");
   const row = matrix.find((r) => r[0] === "Revenue growth (YoY)");
   assert.deepEqual(row.slice(1, 1 + horizon.weeks.length), source.cells.map((cell) => cell.rho));
-  assert.deepEqual(row.slice(1 + horizon.weeks.length), [source.aggregate.rho, source.aggregate.verdict, source.aggregate.excessReturnPerSd.qValue, source.weeksPositive, source.weeksNegative, source.weeksUsed, source.consistency.score]);
+  assert.deepEqual(row.slice(1 + horizon.weeks.length), [source.aggregate.rho, source.aggregate.verdict, source.aggregate.excessReturnPerSd.qValue, source.weeksPositive, source.weeksNegative, source.weeksUsed, source.consistency.score, "rank among industry peers"]);
   assert.deepEqual(matrix.find((r) => r[0] === "Pitches graded").slice(1), [...horizon.weeks.map((w) => w.graded), horizon.graded]);
   const spread = sheetOf(sheets, "Spread 10d").rows.find((r) => r[0] === "Revenue growth (YoY)");
   assert.deepEqual(spread.slice(1), [...source.cells.map((cell) => cell.spread), source.spread.overall, source.spread.meanWeekly, source.spread.sdWeekly, source.spread.weeksUsed]);
@@ -171,6 +174,8 @@ test("the export job writes one workbook and one CSV per tab, read-only, and onl
     const written = readdirSync(dir).sort();
     assert.equal(written.filter((name) => name.endsWith(".csv")).length, result.sheets.length);
     assert.ok(written.includes("mandate-review-2026-03-13-adjustments.csv"));
+    assert.match(readFileSync(result.changeRequestPath, "utf8"), /^Mandate weight change request/);
+    assert.equal(written.filter((name) => name.endsWith(".txt")).length, 1);
     assert.ok(Object.keys(unzip(readFileSync(result.xlsxPath))).includes("xl/worksheets/sheet1.xml"));
     assert.match(readFileSync(path.join(dir, "mandate-review-2026-03-13-matrix-10d.csv"), "utf8"), /^"Correlation with 10-day excess return, by entry week"\r\nMetric,2026-01-05,/);
   } finally {

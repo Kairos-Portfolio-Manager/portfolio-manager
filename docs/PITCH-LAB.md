@@ -36,6 +36,8 @@ Agent One ──► pitch record ──► Postgres pitch_lab_pitches      (appe
 | Schedule | `lib/pitch-lab/schedule.js` | Next weekly report (Sat 10:00 ET) and Mandate Review (**19:40 ET on the week's last trading day**: Friday, or earlier when Friday is a market holiday; one hour after that day's 18:40 run. Period = that day as YYYY-MM-DD — reviews from 2026-11-14 carry their Saturday, older ones their YYYY-MM month). The snapshot also carries `performers`: best/worst 5 pitches by raw return over their longest matured holding period. |
 | Weekly matrix | `lib/pitch-lab/weekly-matrix.js` | Pure. The nine mandate metrics week by week (see "Weekly matrix"): per-week and aggregate correlation with excess return, weekly tally, consistency score, top-vs-bottom spread, and the weaker/stronger-than-the-others test. Carried on the report as `weeklyMatrix`. |
 | Review adjustments | `lib/pitch-lab/mandate-adjustments.js` | Pure. Turns the matrix into a suggested weight change in bps per metric (see "Mandate Review adjustments"). Never imports the mandate config; the weights are a parameter. |
+| Metric ideas | `lib/pitch-lab/metric-candidates.js` | Pure. Soft suggestions about the metric list: recorded features worth adding, mandate metrics with no data / no effect / a backwards effect / overlap with another. On the review as `metricCandidates`. |
+| Consensus collector | `lib/pitch-lab/consensus-plan.js` + `runPitchLabConsensusCollect` | Daily 07:10 ET (flag `PITCH_LAB_CONSENSUS_COLLECT=1`): observes consensus for Agent One's pool so estimate revisions and revenue beat have history. See "Data coverage". |
 | Review export | `lib/pitch-lab/review-export.js`, `xlsx-writer.js`, `review-export-files.js` | The review as a spreadsheet: one `.xlsx` (dependency-free writer) plus a `.csv` per tab. Only `review-export-files.js` touches disk. |
 | Dashboard snapshot | `lib/pitch-lab/dashboard-snapshot.js` | Small `pitch-lab.snapshot.v2` payload for the website status page (schedule, recent pitches with excess returns, per-pitch Mandate Score breakdown, legacy conviction mixes). |
 | Review history | `lib/pitch-lab-review-publisher.js` | Publishes each Mandate Review to `pitchlab:mandate-review:<id>` plus the `pitchlab:mandate-reviews` index (CLI task `review-history`). `node jobs/pitch-lab-daily.js snapshot` republishes the website snapshot on demand. |
@@ -259,15 +261,43 @@ Rough scale: an effect as small as 0.5% per conviction point needs a few hundred
 graded pitches spread over months to show up. The per-month view will say
 "insufficient data" for a long time; that is correct, not a bug.
 
+## Data coverage (why a metric says "no data")
+
+The daily digest ends with `Data behind today's scores`: how many of the day's scored pitches
+had each mandate metric. Read it after any data change. What feeds each metric:
+
+| Metric | Source | Why it is missing when it is |
+|---|---|---|
+| Revenue growth, EPS trajectory, margin trend, forward P/E, balance sheet | Yahoo fundamentals + EDGAR facts, ranked against the peer table | No EDGAR facts / not reported / fewer than the minimum peers (then fixed bands). Turn on `PITCH_LAB_PEER_REQUESTS=1` so thin cohorts are requested from the 17:30 peer refresh. |
+| Revenue beat | Consensus history (`consensus_snapshots`) + reported revenue | Needs a snapshot taken BEFORE the quarter was reported. No peer values exist, so it is always scored on fixed bands. |
+| Estimate revisions | Consensus history | Activates only with >= 3 snapshots spanning >= 30 days for that ticker. |
+| Institutional ownership, 13F | SEC 13F data sets (`lib/thirteen-f*.js`, `lib/cusip-map.js`) | **Not ingested yet**: the maths exists, no job downloads the data sets or maps tickers to CUSIPs. Next data batch. |
+
+**Consensus collector.** History used to accumulate only for names the universe and peer jobs
+touched, so most pitched names had none. `node jobs/pitch-lab-daily.js consensus-collect`
+(scheduled 07:10 ET Mon-Fri in the `pitch-lab` process, only with `PITCH_LAB_CONSENSUS_COLLECT=1`)
+observes Yahoo consensus for Agent One's screened pool: the top 60 of its ranking every day, then
+the rest least-recently-observed first, `PITCH_LAB_CONSENSUS_LIMIT` (250) a pass, skipping
+anything observed in the last 20 hours. It appends to the same durable `consensus_snapshots`
+history, through the same row builder, that the universe and peer jobs write — so the live mandate
+scorer reads it too. Estimate revisions therefore start appearing about 30 days after it is
+switched on, and not before.
+
 ## Weekly matrix
 
 `report.weeklyMatrix` (`pitch-lab.weekly-matrix.v1`), built by `weekly-matrix.js`. For each
 holding period: one row per mandate metric (always all nine), one column per **ISO week of
 entry** (the same week rule the analysis clusters on), then the aggregate.
 
-- **Cell** = Spearman correlation between the metric's industry-peer percentile and the pitch's
-  excess return vs the benchmark. The percentile is direction-adjusted, so **positive always means
-  the metric worked the way the mandate expects** (for lower-is-better metrics too).
+- **Cell** = Spearman correlation between the metric's score and the pitch's excess return vs the
+  benchmark. Each metric has one `basis` per holding period, never mixed: `peer_percentile` (rank
+  among industry peers) wherever peers cover at least half of the pitches the scorer could score,
+  otherwise `points_share` (the share of the metric's own mandate points from the stored 0-100
+  score). The second exists because revenue beat, estimate revisions and the 13F pair are scored on
+  fixed bands and have no peer rank; without it they could never be reviewed. Both are
+  direction-adjusted, so **positive always means the metric worked the way the mandate expects**.
+- `overlaps`: pairs of metrics whose scores rank the same pitches almost identically
+  (|Spearman| >= 0.7 on >= 50 shared pitches). Weighting both mostly counts one signal twice.
 - **Aggregate** = the report's own all-time `peerMetrics` block (cluster bootstrap, BH q-value
   across the nine). It is the only evidence that can create a suggestion.
 - **Weekly cells are descriptive.** A cell needs 10 usable pitches, else it is blank with its
@@ -288,7 +318,8 @@ entry** (the same week rule the analysis clusters on), then the aggregate.
 weeklyMatrix: { version, options,
   horizons: [ { horizonDays, graded, weekCount,
     weeks: [ { week, weekStart, graded, meanExcessReturn, meanBenchmarkReturn } ],
-    metrics: [ { id, label,
+    overlaps: [ { a, b, rho, n } ],
+    metrics: [ { id, label, basis,
       cells: [ { week, n, rho, ci95, significant, spread } ],
       aggregate: { n, weeks, rho, ci95, excessReturnPerSd, verdict },
       weeksPositive, weeksNegative, weeksUsed,
@@ -328,6 +359,21 @@ Rules. **Suggestions only: nothing reads or writes the mandate config.**
   shows again.
 - The original `metrics[]` verdicts (raw metric values, across horizons) are unchanged. The
   adjustments use the peer percentile because that is what the mandate scores on.
+
+- `mandateWeights` — the exact weights the review was sized against (`fingerprint`, `points`). The
+  job reads `config/scoring/mandate-v2.js` **fresh from disk on every run** (`currentAgentScoring`),
+  so a weight change is picked up even if the `pitch-lab` process was not restarted; when the
+  running process is behind the file it also sends a Telegram warning to restart (new pitches are
+  scored by the running process).
+- `metricCandidates` — `{ horizonDays, add[], remove[] }`, soft ideas about the metric list
+  (`metric-candidates.js`). `add`: a recorded feature the mandate does not weight whose effect
+  survives the false-discovery control (`consider`) or whose interval excludes zero (`leaning`).
+  `remove`: a mandate metric with `no_data`, a `flat` effect on >= 100 pitches, a `backwards`
+  effect, or one that `overlaps` another. Not sized; printed in Telegram only when non-empty.
+
+The export also writes a **Change request** tab and `…-change-request.txt`: the sized changes as
+paste-ready text for whoever applies them through Claude and a reviewed commit. Nothing applies a
+change automatically, and there is no button.
 
 The Telegram review ends with one line per metric (`Revenue growth (YoY): +100 bps, recommended
 (went with better results; corr +0.19, positive 8 of 10 weeks)`).
