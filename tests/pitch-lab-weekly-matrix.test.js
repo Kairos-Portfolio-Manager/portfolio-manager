@@ -188,3 +188,55 @@ test("trimWeeklyMatrix keeps the most recent weeks and leaves the aggregate alon
   assert.equal(matrix.horizons[0].weeks.length, 6, "the original is not modified");
   assert.equal(trimWeeklyMatrix(null, 4), null);
 });
+
+// ─── Metrics with no peer rank, and overlap between metrics ──────────────────
+
+/** Give every synthetic pitch a stored 0-100 score whose revBeat points depend on `beat(pitch)`. */
+function withRevBeatPoints({ pitches, outcomes }, effect = 0.08) {
+  const random = seededRandom(99);
+  const share = new Map();
+  const scored = pitches.map((pitch) => {
+    const fraction = [0, 0.5, 0.75, 1][Math.floor(random() * 4)];
+    share.set(pitch.id, fraction);
+    return { ...pitch, mandateScore: { status: "scored", total: 50, perMetric: { revBeat: { points: fraction * 10, maxPoints: 10, missing: false, fallbackMethod: "absolute", percentile: null }, thirteenF: { points: null, maxPoints: 6, missing: true } } } };
+  });
+  return { pitches: scored, outcomes: outcomes.map((o) => ({ ...o, excessReturn: o.excessReturn + effect * (share.get(o.pitchId) - 0.5) })) };
+}
+
+test("a metric with no peer rank is read on its share of mandate points instead of staying empty", () => {
+  const data = withRevBeatPoints(synthetic({ effects: { revGrowth: 0.08 } }));
+  const matrix = buildWeeklyMatrix(data);
+  const beat = row(matrix, "revBeat");
+  assert.equal(beat.basis, "points_share");
+  assert.equal(beat.aggregate.n, 300);
+  assert.ok(beat.aggregate.rho > 0.3, `fixed-band metric shows its planted effect: ${beat.aggregate.rho}`);
+  assert.equal(beat.weeksUsed, 10);
+  // Peer-ranked metrics keep the finer percentile basis; a metric with no data at all stays empty.
+  assert.equal(row(matrix, "revGrowth").basis, "peer_percentile");
+  assert.equal(row(matrix, "thirteenF").aggregate.n, 0);
+  // The report's aggregate for a points-share metric is the report's own points-share block.
+  const report = analyzePitchLab({ ...data, now: new Date("2026-04-01T00:00:00Z"), options: { bootstrapIterations: 200, matrix: { relativeIterations: 100 } } });
+  const reported = row(report.weeklyMatrix, "revBeat");
+  assert.equal(reported.basis, "points_share");
+  assert.equal(reported.aggregate.verdict, "positive");
+  assert.ok(Number.isFinite(reported.aggregate.excessReturnPerSd.qValue));
+});
+
+test("peers must cover at least half of the scorable pitches to stay the basis", () => {
+  const base = withRevBeatPoints(synthetic({ weeks: 4, perWeek: 20 }));
+  // revBeat peer-ranked on only 10 of 80 pitches: too few, so the points share is used for all 80.
+  const few = { ...base, pitches: base.pitches.map((p, i) => (i < 10 ? { ...p, peers: { ranks: { ...p.peers.ranks, revBeat: { status: "ranked", percentile: 0.5 } } } } : p)) };
+  assert.deepEqual({ basis: row(buildWeeklyMatrix(few), "revBeat").basis, n: row(buildWeeklyMatrix(few), "revBeat").aggregate.n }, { basis: "points_share", n: 80 });
+  const most = { ...base, pitches: base.pitches.map((p, i) => (i < 50 ? { ...p, peers: { ranks: { ...p.peers.ranks, revBeat: { status: "ranked", percentile: (i % 10) / 10 } } } } : p)) };
+  assert.deepEqual({ basis: row(buildWeeklyMatrix(most), "revBeat").basis, n: row(buildWeeklyMatrix(most), "revBeat").aggregate.n }, { basis: "peer_percentile", n: 50 });
+});
+
+test("two metrics that rank the same pitches the same way are reported as overlapping", () => {
+  const data = synthetic({ weeks: 4, perWeek: 20 });
+  const twinned = { ...data, pitches: data.pitches.map((p) => ({ ...p, peers: { ranks: { ...p.peers.ranks, epsTrajectory: { status: "ranked", percentile: Math.min(1, p.peers.ranks.revGrowth.percentile * 0.9 + 0.05) } } } })) };
+  const [horizon] = buildWeeklyMatrix(twinned).horizons;
+  assert.equal(horizon.overlaps.length, 1);
+  assert.deepEqual({ a: horizon.overlaps[0].a, b: horizon.overlaps[0].b, n: horizon.overlaps[0].n }, { a: "revGrowth", b: "epsTrajectory", n: 80 });
+  assert.ok(horizon.overlaps[0].rho > 0.95);
+  assert.deepEqual(buildWeeklyMatrix(data).horizons[0].overlaps, [], "independent metrics are not flagged");
+});
