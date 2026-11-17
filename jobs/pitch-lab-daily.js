@@ -549,6 +549,15 @@ export async function runPitchLabConsensusCollect({
     if (batch.length >= checkpoint) await flush();
   }
   await flush();
+  // A source that answers for nothing is an outage, not a quiet day (fetchConsensusTrend
+  // swallows its own errors and returns null): fail the job so the scheduler pages.
+  if (summary.planned > 0 && summary.observed === 0) {
+    throw new Error(`consensus collection observed nothing: the source returned no consensus for any of ${summary.planned} tickers`);
+  }
+  if (summary.observed < summary.planned / 2) {
+    summary.status = "partial";
+    console.error(`[PitchLab] consensus collect: only ${summary.observed} of ${summary.planned} tickers returned consensus — the source may be refusing requests.`);
+  }
   // Every write failing is a broken collector, not a quiet day: fail the job so the scheduler pages.
   if (summary.observed > 0 && summary.stored === 0 && summary.writeFailures === summary.observed) {
     throw new Error(`consensus collection stored nothing: all ${summary.observed} observations failed to write`);

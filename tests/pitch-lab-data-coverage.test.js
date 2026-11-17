@@ -120,6 +120,16 @@ test("the consensus collector skips names already observed today, and fails loud
     () => runPitchLabConsensusCollect({ ...base, readLatest: async () => new Map(), saveSnapshots: async () => { throw new Error("pg down"); } }),
     /stored nothing/,
   );
+  // The source answering for nothing is an outage, and answering for under half is flagged.
+  await assert.rejects(
+    () => runPitchLabConsensusCollect({ ...base, getConsensusTrend: async () => null, readLatest: async () => new Map(), saveSnapshots: async (rows) => ({ inserted: rows.length }) }),
+    /observed nothing/,
+  );
+  const mostlyRefused = await runPitchLabConsensusCollect({
+    ...base, getConsensusTrend: async (ticker) => (ticker === pool[0] ? trendFor(ticker) : null),
+    readLatest: async () => new Map(), saveSnapshots: async (rows) => ({ inserted: rows.length }),
+  });
+  assert.deepEqual({ status: mostlyRefused.status, observed: mostlyRefused.observed, stored: mostlyRefused.stored }, { status: "partial", observed: 1, stored: 1 });
   await assert.rejects(() => runPitchLabConsensusCollect({ ...base, getCatalog: async () => ({}), readLatest: async () => new Map(), saveSnapshots: async () => ({ inserted: 0 }) }), /catalog unavailable/);
 });
 
