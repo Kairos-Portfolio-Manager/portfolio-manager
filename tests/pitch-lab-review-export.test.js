@@ -93,7 +93,7 @@ const sheetOf = (sheets, name) => sheets.find((sheet) => sheet.name === name);
 test("the export has a tab for the summary, the adjustments, each holding period's matrix and spread, and the pitches", () => {
   const sheets = buildReviewExport({ review, report, ...data });
   // The review's own holding period (10 days) comes first.
-  assert.deepEqual(sheets.map((sheet) => sheet.name), ["Summary", "Adjustments", "Change request", "Metric ideas", "Matrix 10d", "Matrix 5d", "Spread 10d", "Spread 5d", "Pitches"]);
+  assert.deepEqual(sheets.map((sheet) => sheet.name), ["Summary", "Adjustments", "Change request", "Metric ideas", "Revisions check", "Matrix 10d", "Matrix 5d", "Spread 10d", "Spread 5d", "Pitches"]);
   const summary = sheetOf(sheets, "Summary").rows;
   assert.deepEqual(summary.find((row) => row[0] === "Review period"), ["Review period", "2026-03-13"]);
   assert.ok(summary.some((row) => row[0] === "Mandate weights used" && /A\.revBeat=10/.test(row[1])));

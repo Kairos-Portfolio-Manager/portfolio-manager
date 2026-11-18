@@ -22,6 +22,11 @@ so merging this one ships both. Read `docs/releases/2026-11-18-pitch-lab-data-co
   - fixed-band metrics say `fixed bands (no peer data for this metric)` or
     `fixed bands (only 4 peers, too few to rank)` instead of always "too few peers";
   - the data line shows how many pitches are still building estimate-revision history.
+- **Estimate revisions shadow (never scored):** each pitch's consensus snapshot already carries
+  Yahoo's own "estimate 30 days ago"; the daily digest now shows that vendor-reported change next
+  to "building history", and every Mandate Review (and export tab "Revisions check") compares it
+  with the 30-day change we measure ourselves once our history is long enough, with a verdict
+  after 20 tickers. It does not change any score.
 - `docs/roadmaps/consensus-metrics-plan.md`: saved plan for real revenue-beat and
   estimate-revision values (not built).
 

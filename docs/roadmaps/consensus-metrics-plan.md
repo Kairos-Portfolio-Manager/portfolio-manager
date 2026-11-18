@@ -87,8 +87,15 @@ bands exactly. Re-run the Mandate Review afterwards and note the cohort break.
   `earningsHistory` gives past EPS surprises (EPS, not revenue): could be an interim proxy for
   revenue beat, but it is a different metric. **DECIDE** only if revenue-beat coverage stays
   low after one full earnings season.
-- Declined: using Yahoo's own 7/30/60/90-days-ago EPS to skip the 30-day wait. Sam C kept the
-  mandate's 30-day local-history rule (2026-11-18).
+- Not adopted for scoring: using Yahoo's own 7/30/60/90-days-ago EPS to skip the 30-day wait.
+  Sam C kept the mandate's 30-day local-history rule (2026-11-18) and chose to **shadow** it
+  instead (built: `lib/pitch-lab/vendor-revisions.js`). Every review carries
+  `vendorRevisionShadow`: Yahoo's 30-day change next to the one we measure ourselves (same
+  fiscal period, 25-40 days apart), with a verdict once 20 tickers are compared
+  (`vendor_matches` / `vendor_mostly_matches` / `vendor_differs`). If it matches, switching to
+  the vendor figure is an evidence-based mandate change for the owner to decide; it is never
+  scored automatically. Note the shadow's self-measured side already uses the Phase 0 rules
+  (30-day window, same period), so it is also a preview of what Phase 0 changes.
 
 ## Order and size
 
