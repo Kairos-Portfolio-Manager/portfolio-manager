@@ -1,6 +1,11 @@
 # Plan: 13F ingestion (institutional ownership + 13F accumulation)
 
-**Status:** plan only, nothing built. Written 2026-11-18. Owner decisions are marked **DECIDE**.
+**Status:** Phases 1-2 built as code plus a **dry run** (2026-11-18, branch `claude/13f-ingest`):
+`lib/zip-stream.js`, `lib/thirteen-f-stream.js`, `lib/cusip-map.js` (reversed), and
+`node jobs/thirteen-f-ingest.js dry-run`, which also performs Phase 0. Nothing is stored,
+scheduled or scored yet. Phases 3-5 wait for the dry-run report from the Jetson.
+Decided by Sam C: free OpenFIGI key (`OPENFIGI_API_KEY`), weekly refresh, backfill 3 report
+periods.
 Everything here uses free, public sources.
 
 ## Why this is the next build

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { deriveThirteenFEvidence, MAX_QUARTER_AGE_DAYS } from "../lib/thirteen-f.js";
 import { parseTsv, resolveLatestSubmissions, aggregateSharesByCusip, toTickerQuarters } from "../lib/thirteen-f-dataset.js";
-import { resolveCusips, chunk } from "../lib/cusip-map.js";
+import { chunk } from "../lib/cusip-map.js";
 
 const quarter = (periodEnd, publishedAt, institutionalShares) => ({ periodEnd, publishedAt, institutionalShares });
 const shares = (rows) => rows.map(([end, val]) => ({ end, val }));
@@ -161,39 +161,8 @@ test("toTickerQuarters skips unmapped tickers instead of guessing", () => {
 
 // --- CUSIP mapping ---
 
-test("resolveCusips batches, caches, and maps by position", async () => {
-  let calls = 0;
-  const fetchImpl = async (_url, init) => {
-    calls++;
-    const jobs = JSON.parse(init.body);
-    return { ok: true, json: async () => jobs.map((j) => ({ data: [{ cusip: j.idValue === "AAPL" ? "037833100" : "67066G104" }] })) };
-  };
-  const out = await resolveCusips(["aapl", "NVDA"], { fetchImpl });
-  assert.equal(out.cusipByTicker.AAPL, "037833100");
-  assert.equal(out.cusipByTicker.NVDA, "67066G104");
-  assert.equal(calls, 1);
-
-  // A cached ticker is not re-requested.
-  const cached = await resolveCusips(["AAPL"], { cache: out.cusipByTicker, fetchImpl: async () => { throw new Error("should not be called"); } });
-  assert.equal(cached.cusipByTicker.AAPL, "037833100");
-});
-
-test("a provider failure degrades coverage instead of aborting the universe", async () => {
-  const out = await resolveCusips(["AAPL"], { fetchImpl: async () => { throw new Error("boom"); } });
-  assert.equal(out.cusipByTicker.AAPL, null);
-  assert.deepEqual(out.unresolved, ["AAPL"]);
-  assert.equal(out.errors.length, 1);
-});
-
-test("a misaligned response is discarded rather than mis-attributed", async () => {
-  // Fewer results than jobs means we cannot tell which CUSIP belongs to which ticker.
-  // Attributing another company's ownership to this one is the worst available outcome.
-  const fetchImpl = async () => ({ ok: true, json: async () => [{ data: [{ cusip: "037833100" }] }] });
-  const out = await resolveCusips(["AAPL", "NVDA"], { fetchImpl });
-  assert.equal(out.cusipByTicker.AAPL, null);
-  assert.equal(out.cusipByTicker.NVDA, null);
-  assert.match(out.errors[0], /results for 2 jobs/);
-});
+// The ticker → CUSIP direction was removed: OpenFIGI does not return CUSIPs. The reversed
+// CUSIP → ticker mapping is tested in tests/thirteen-f-stream.test.js.
 
 test("chunk respects the OpenFIGI 100-job ceiling", () => {
   assert.equal(chunk(new Array(250).fill("X")).length, 3);
