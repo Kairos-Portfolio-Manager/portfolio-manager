@@ -9,7 +9,7 @@
 #   3. pulls, runs npm test (rolls the checkout back on failure: nothing restarted)
 #   4. db:migrate, signed deploy:restart, pm2 restart pitch-lab, health, sysloop, Pitch Lab snapshot
 #   5. prints the report to send back to Sam C
-# Release notes: the newest file under docs/releases/ (latest: 2026-11-18-pitch-lab-data-coverage.md)
+# Release notes: the newest file under docs/releases/ (latest: 2026-11-19-margin-and-wording.md)
 set -euo pipefail
 
 BRANCH=mandate-v3

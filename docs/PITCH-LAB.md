@@ -268,9 +268,9 @@ had each mandate metric. Read it after any data change. What feeds each metric:
 
 | Metric | Source | Why it is missing when it is |
 |---|---|---|
-| Revenue growth, EPS trajectory, margin trend, forward P/E, balance sheet | Yahoo fundamentals + EDGAR facts, ranked against the peer table | No EDGAR facts / not reported / fewer than the minimum peers (then fixed bands). Turn on `PITCH_LAB_PEER_REQUESTS=1` so thin cohorts are requested from the 17:30 peer refresh. |
+| Revenue growth, EPS trajectory, margin trend, forward P/E, balance sheet | Yahoo fundamentals + EDGAR facts, ranked against the peer table | No EDGAR facts / not reported / fewer than the minimum peers (then fixed bands). Gross margin uses the filed `GrossProfit` line, else revenue minus cost of revenue (never mixed within one comparison); companies with neither (airlines, banks) have no margin value. Turn on `PITCH_LAB_PEER_REQUESTS=1` so thin cohorts are requested from the 17:30 peer refresh. |
 | Revenue beat | Consensus history (`consensus_snapshots`) + reported revenue | Needs a snapshot taken BEFORE the quarter was reported. No peer values exist, so it is always scored on fixed bands. |
-| Estimate revisions | Consensus history | Activates only with >= 3 snapshots spanning >= 30 days for that ticker. |
+| Estimate revisions | Consensus history | Activates only with >= 3 snapshots spanning >= 30 days for that ticker; the digest says "building history (n of 3 snapshots, d of 30 days)" until then. Known definition gaps (window, quarter rollover, next-12-month EPS) are in `docs/roadmaps/consensus-metrics-plan.md`. |
 | Institutional ownership, 13F | SEC 13F data sets (`lib/thirteen-f*.js`, `lib/cusip-map.js`) | **Not ingested yet**: the maths exists, no job downloads the data sets or maps tickers to CUSIPs. Next data batch. |
 
 **Consensus collector.** History used to accumulate only for names the universe and peer jobs
