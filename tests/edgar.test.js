@@ -90,6 +90,38 @@ test("deriveFundamentalMetrics computes the v2.1 quantities", () => {
   assert.equal(m.equityRatio, 0.4);
 });
 
+test("gross margin falls back to revenue minus cost of revenue when GrossProfit is not filed", () => {
+  // Same economics as the fixture (cost 60% then 50% of revenue), filed as a cost line instead.
+  const cost = QUARTER_ENDS.map((e, i) => flow(e, [60, 60, 60, 60, 55, 60, 65, 70][i]));
+  const noGrossProfit = facts({ GrossProfit: { units: { USD: [] } }, CostOfRevenue: { units: { USD: cost } } });
+  const m = deriveFundamentalMetrics(noGrossProfit);
+  assert.ok(Math.abs(m.grossMarginTrendYoY - 0.1) < 1e-9); // (140-70)/140 − (100-60)/100 = 0.5 − 0.4
+  assert.equal(m._grossMarginSource, "revenue_minus_cost_of_revenue");
+  assert.equal(edgarMetricSubset(noGrossProfit).marginTrend, m.grossMarginTrendYoY, "the scorer's marginTrend picks it up");
+  // Second tag in the chain works too.
+  const goods = deriveFundamentalMetrics(facts({ GrossProfit: { units: { USD: [] } }, CostOfGoodsAndServicesSold: { units: { USD: cost } } }));
+  assert.equal(goods._grossMarginSource, "revenue_minus_cost_of_revenue");
+  // A filed GrossProfit always wins.
+  assert.equal(deriveFundamentalMetrics(facts({ CostOfRevenue: { units: { USD: cost.map((f) => ({ ...f, val: 1 })) } } }))._grossMarginSource, "gross_profit");
+  assert.equal(deriveFundamentalMetrics(facts())._grossMarginSource, "gross_profit");
+});
+
+test("gross margin never mixes sources and stays null when neither line is usable", () => {
+  // GrossProfit only for the latest year, cost of revenue throughout: the YoY comparison needs
+  // both quarters from one source, so the derived series is used for both.
+  const gpLate = QUARTER_ENDS.slice(4).map((e, i) => flow(e, [999, 999, 999, 999][i]));
+  const cost = QUARTER_ENDS.map((e, i) => flow(e, [60, 60, 60, 60, 55, 60, 65, 70][i]));
+  const mixed = deriveFundamentalMetrics(facts({ GrossProfit: { units: { USD: gpLate } }, CostOfRevenue: { units: { USD: cost } } }));
+  assert.equal(mixed._grossMarginSource, "revenue_minus_cost_of_revenue");
+  assert.ok(Math.abs(mixed.grossMarginTrendYoY - 0.1) < 1e-9);
+  // An airline-style filer: no gross profit, no cost of revenue.
+  const neither = deriveFundamentalMetrics(facts({ GrossProfit: { units: { USD: [] } } }));
+  assert.deepEqual({ value: neither.grossMarginTrendYoY, source: neither._grossMarginSource }, { value: null, source: null });
+  // A cost line larger than revenue is a tagging problem, not a negative margin.
+  const broken = deriveFundamentalMetrics(facts({ GrossProfit: { units: { USD: [] } }, CostOfRevenue: { units: { USD: cost.map((f) => ({ ...f, val: f.val * 10 })) } } }));
+  assert.equal(broken.grossMarginTrendYoY, null);
+});
+
 test("zero-debt company gets the strong interest-coverage sentinel", () => {
   const f = facts({ InterestExpense: { units: { USD: [] } } });
   assert.equal(deriveFundamentalMetrics(f).interestCoverage, 999);

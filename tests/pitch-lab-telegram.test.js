@@ -86,7 +86,7 @@ test("daily Pitch Lab message says how a metric was scored when peers were too t
     balanceSheet: metric(6.25, 10, 0.8, { fallbackMethod: "blended_50_50", peerCount: 5 }),
   }, { uncappedTotal: 91, thinPeerSet: true });
   const message = formatPitchLabDailyTelegram({ date: "2026-11-17", pitches: [pitch] });
-  assert.match(message, /Gross-margin trend: fixed bands \(too few peers to rank\), 9\/12 pts/);
+  assert.match(message, /Gross-margin trend: fixed bands \(only 2 peers, too few to rank\), 9\/12 pts/);
   assert.match(message, /Balance-sheet strength: 80th percentile, blended with fixed bands \(thin peer set\), 6\.25\/10 pts/);
   assert.match(message, /= 84\/100 \(3 of 9 metrics had data, capped from 91 for a thin peer set\)/);
   // A metric that was not ranked against peers gets no peer-band wording in the risk line.
@@ -114,6 +114,42 @@ test("daily Pitch Lab message does not invent a worst metric when every scored m
   const message = formatPitchLabDailyTelegram({ date: "2026-11-17", pitches: [even] });
   assert.match(message, /Stands out: Revenue growth \(YoY\), 70th percentile, 7\.5\/15 pts\./);
   assert.match(message, /Biggest risk: no single metric; every scored metric earned 50% of its points\./);
+});
+
+test("a fixed-band metric says whether the peer table has no data for it or only too few peers", () => {
+  const pitch = scoredPitch("FIX", 70, {
+    revBeat: metric(10, 10, null, { fallbackMethod: "absolute", peerCount: 0 }),
+    marginTrend: metric(9, 12, null, { fallbackMethod: "absolute", peerCount: 1 }),
+    balanceSheet: metric(5, 10, null, { fallbackMethod: "absolute", peerCount: undefined }),
+  });
+  const message = formatPitchLabDailyTelegram({ date: "2026-11-18", pitches: [pitch] });
+  assert.match(message, /Revenue beat vs consensus: fixed bands \(no peer data for this metric\), 10\/10 pts/);
+  assert.match(message, /Gross-margin trend: fixed bands \(only 1 peer, too few to rank\), 9\/12 pts/);
+  assert.match(message, /Balance-sheet strength: fixed bands \(too few peers to rank\), 5\/10 pts/, "an older record without a peer count keeps the old wording");
+  assert.doesNotMatch(message, /no data, not scored.*Revenue beat/);
+});
+
+test("unscored estimate revisions say how far the ticker is from the 30-day activation rule", () => {
+  const day = (n) => new Date(Date.parse("2026-11-01T12:00:00Z") + n * 86_400_000).toISOString();
+  const withHistory = (ticker, times) => ({
+    ...scoredPitch(ticker, 60, { revGrowth: metric(7.5, 15, 0.7), estimateRevisions: metric(null, 12, null) }),
+    mandateInputs: { consensus: times == null ? null : { snapshot: null, history: times.map((t) => ({ retrievedAt: t, epsAvg: 1 })) } },
+  });
+  const message = formatPitchLabDailyTelegram({ date: "2026-11-18", pitches: [
+    withHistory("NONE", null),
+    withHistory("TWO", [day(0), day(4)]),
+    withHistory("MANY", [day(0), day(3), day(6), day(9)]), // enough snapshots, not enough days
+    withHistory("DONE", [day(0), day(15), day(31)]), // rule met, but the scorer found no signal
+  ] });
+  const lineFor = (ticker) => message.split("\n\n").find((block) => block.includes(`. ${ticker} —`)).split("\n").find((line) => line.startsWith("Analyst estimate revisions:"));
+  assert.equal(lineFor("NONE"), "Analyst estimate revisions: no consensus history yet, not scored");
+  assert.equal(lineFor("TWO"), "Analyst estimate revisions: building history (2 of 3 snapshots, 4 of 30 days), not scored");
+  assert.equal(lineFor("MANY"), "Analyst estimate revisions: building history (3 of 3 snapshots, 9 of 30 days), not scored");
+  assert.equal(lineFor("DONE"), "Analyst estimate revisions: history complete but no revision signal, not scored");
+  // Other unscored metrics keep the plain wording, and the data line counts who is still building.
+  assert.match(message, /Gross-margin trend: no data, not scored/);
+  assert.match(message, /\nAnalyst estimate revisions: 0 \(2 more building history\)\n/);
+  assert.match(message, /\nRevenue growth \(YoY\): 4\n/);
 });
 
 test("a long digest is split between blocks, never mid-line, and loses nothing", () => {
