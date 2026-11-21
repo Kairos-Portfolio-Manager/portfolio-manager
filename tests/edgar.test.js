@@ -185,3 +185,89 @@ test("history primitives expose chronology-safe CAGR, margin, and coverage scaff
   assert.ok(history.epsCagr3yRaw == null || typeof history.epsCagr3yRaw === "number");
   assert.equal(history.gates.estimates, "unavailable");
 });
+
+// --- missing quarters, latest revenue tag, contiguous TTM -------------------
+import { deriveMissingQuarters, rawFacts as rawFactsForChain, LATEST_WINS_CHAINS, DERIVABLE_QUARTER_CHAINS } from "../lib/edgar-facts.js";
+
+const fact = (start, end, val, filed = end, form = "10-Q") => ({ start, end, val, filed, form, fy: Number(end.slice(0, 4)), fp: null, frame: null });
+const companyWith = (concepts) => ({ cik: 1, entityName: "T", facts: { "us-gaap": Object.fromEntries(Object.entries(concepts).map(([name, rows]) => [name, { units: { USD: rows } }])) } });
+
+test("a fourth quarter filed only inside the 10-K is derived as full year minus the three quarters", () => {
+  const rows = [
+    fact("2024-01-01", "2024-03-31", 100), fact("2024-04-01", "2024-06-30", 110), fact("2024-07-01", "2024-09-30", 120),
+    fact("2024-01-01", "2024-12-31", 470, "2025-02-20", "10-K"),
+    fact("2025-01-01", "2025-03-31", 130), fact("2025-04-01", "2025-06-30", 140), fact("2025-07-01", "2025-09-30", 150),
+    fact("2025-01-01", "2025-12-31", 600, "2026-02-18", "10-K"),
+  ];
+  const q = quarterlySeries(companyWith({ Revenues: rows }), CONCEPTS.revenue);
+  assert.deepEqual(q.map((r) => [r.end, r.val]), [["2024-03-31", 100], ["2024-06-30", 110], ["2024-09-30", 120], ["2024-12-31", 140], ["2025-03-31", 130], ["2025-06-30", 140], ["2025-09-30", 150], ["2025-12-31", 180]]);
+  const q4 = q.find((r) => r.end === "2025-12-31");
+  assert.deepEqual({ derived: q4.derived, filed: q4.filed, start: q4.start }, { derived: "full_year_minus_quarters", filed: "2026-02-18", start: "2025-10-01" });
+  // Point in time: before the 10-K is filed, that fourth quarter does not exist.
+  const beforeTenK = quarterlySeries(companyWith({ Revenues: rows }), CONCEPTS.revenue, "USD", { asOf: "2026-02-01" });
+  assert.equal(beforeTenK.at(-1).end, "2025-09-30");
+  // The latest YoY is now the fourth quarter (180 vs 140), and acceleration is computable.
+  const m = deriveFundamentalMetrics(companyWith({ Revenues: rows }));
+  assert.ok(Math.abs(m.revYoY - 180 / 140 + 1) < 1e-9);
+  assert.ok(Math.abs(m.revAccel - ((180 / 140 - 1) - (150 / 120 - 1))) < 1e-9);
+  // The revenue-beat pairing series carries the derived quarter with the 10-K's filing date.
+  assert.deepEqual(m._revenueQuarterSeries.at(-1), { end: "2025-12-31", val: 180, filed: "2026-02-18" });
+});
+
+test("cash-flow lines filed year-to-date become standalone quarters, and TTM is a real year", () => {
+  // 10-Qs report 3, 6 and 9 months; the 10-K reports 12. Only the first quarter is a 3-month figure.
+  const ocf = [
+    fact("2025-01-01", "2025-03-31", 30), fact("2025-01-01", "2025-06-30", 70, "2025-08-01"),
+    fact("2025-01-01", "2025-09-30", 120, "2025-11-01"), fact("2025-01-01", "2025-12-31", 180, "2026-02-18", "10-K"),
+  ];
+  const q = quarterlySeries(companyWith({ NetCashProvidedByUsedInOperatingActivities: ocf }), CONCEPTS.operatingCashFlow);
+  assert.deepEqual(q.map((r) => [r.end, r.val, r.derived ?? "reported"]), [
+    ["2025-03-31", 30, "reported"], ["2025-06-30", 40, "year_to_date_difference"], ["2025-09-30", 50, "year_to_date_difference"], ["2025-12-31", 60, "year_to_date_difference"],
+  ]);
+  assert.equal(ttm(q), 180);
+  // Without derivation the old behaviour summed whatever four "quarters" existed; now a hole gives null.
+  const firstQuartersOnly = [fact("2022-01-01", "2022-03-31", 1), fact("2023-01-01", "2023-03-31", 1), fact("2024-01-01", "2024-03-31", 1), fact("2025-01-01", "2025-03-31", 1)];
+  assert.equal(ttm(quarterlySeries(companyWith({ NetCashProvidedByUsedInOperatingActivities: firstQuartersOnly }), CONCEPTS.operatingCashFlow)), null);
+  assert.equal(ttm([{ val: 1 }, { val: 2 }, { val: 3 }, { val: 4 }]), 10, "bare values without dates are summed as before");
+});
+
+test("derivation never overrides a reported quarter, never invents a gap, and refuses impossible values", () => {
+  // A reported 3-month fourth quarter wins over the subtraction.
+  const reportedQ4 = [
+    fact("2025-01-01", "2025-03-31", 10), fact("2025-04-01", "2025-06-30", 10), fact("2025-07-01", "2025-09-30", 10),
+    fact("2025-10-01", "2025-12-31", 11, "2026-02-18", "10-K"), fact("2025-01-01", "2025-12-31", 99, "2026-02-18", "10-K"),
+  ];
+  const q = quarterlySeries(companyWith({ Revenues: reportedQ4 }), CONCEPTS.revenue);
+  assert.deepEqual(q.map((r) => r.val), [10, 10, 10, 11]);
+  assert.ok(q.every((r) => !r.derived));
+  // A missing second quarter (and no year-to-date figures) stays a gap: the full year cannot be split.
+  const hole = [fact("2025-01-01", "2025-03-31", 10), fact("2025-07-01", "2025-09-30", 10), fact("2025-01-01", "2025-12-31", 50, "2026-02-18", "10-K")];
+  assert.deepEqual(quarterlySeries(companyWith({ Revenues: hole }), CONCEPTS.revenue).map((r) => r.end), ["2025-03-31", "2025-09-30"]);
+  // A negative derived revenue is a filing inconsistency and is dropped; operating income may be negative.
+  const restated = [fact("2025-01-01", "2025-03-31", 50), fact("2025-04-01", "2025-06-30", 50), fact("2025-07-01", "2025-09-30", 50), fact("2025-01-01", "2025-12-31", 120, "2026-02-18", "10-K")];
+  assert.equal(quarterlySeries(companyWith({ Revenues: restated }), CONCEPTS.revenue).length, 3);
+  assert.equal(quarterlySeries(companyWith({ OperatingIncomeLoss: restated }), CONCEPTS.operatingIncome).at(-1).val, -30);
+  // EPS is never derived (per-share figures do not subtract).
+  assert.equal(DERIVABLE_QUARTER_CHAINS.has(CONCEPTS.epsDiluted), false);
+  assert.equal(deriveMissingQuarters([], []).length, 0);
+  // The old behaviour stays available for comparison.
+  assert.equal(quarterlySeries(companyWith({ Revenues: restated }), CONCEPTS.revenue, "USD", { deriveQuarters: false }).length, 3);
+});
+
+test("the revenue line with the most recent data wins over a stale one earlier in the chain", () => {
+  const stale = [fact("2017-01-01", "2017-03-31", 5), fact("2018-01-01", "2018-03-31", 6)];
+  const current = [fact("2025-01-01", "2025-03-31", 100), fact("2026-01-01", "2026-03-31", 130)];
+  const company = companyWith({ RevenueFromContractWithCustomerExcludingAssessedTax: stale, Revenues: current });
+  assert.equal(rawFactsForChain(company, CONCEPTS.revenue).concept, "Revenues");
+  assert.equal(rawFactsForChain(company, CONCEPTS.revenue, "USD", { latestWins: false }).concept, "RevenueFromContractWithCustomerExcludingAssessedTax", "old rule kept for comparison");
+  // As of 2019, the then-current line was the first one: point in time is respected.
+  assert.equal(rawFactsForChain(companyWith({ RevenueFromContractWithCustomerExcludingAssessedTax: stale, Revenues: [fact("2025-01-01", "2025-03-31", 100, "2025-05-01")] }), CONCEPTS.revenue, "USD", { asOf: "2019-01-01" }).concept, "RevenueFromContractWithCustomerExcludingAssessedTax");
+  // A tie keeps the chain order.
+  assert.equal(rawFactsForChain(companyWith({ RevenueFromContractWithCustomerExcludingAssessedTax: current, Revenues: current }), CONCEPTS.revenue).concept, "RevenueFromContractWithCustomerExcludingAssessedTax");
+  // The two added standard tags are picked up.
+  assert.equal(rawFactsForChain(companyWith({ RevenueFromContractWithCustomerIncludingAssessedTax: current }), CONCEPTS.revenue).concept, "RevenueFromContractWithCustomerIncludingAssessedTax");
+  assert.equal(rawFactsForChain(companyWith({ RevenuesNetOfInterestExpense: current }), CONCEPTS.revenue).concept, "RevenuesNetOfInterestExpense");
+  // Balance-sheet chains keep first-with-data: their order is a definition.
+  assert.equal(LATEST_WINS_CHAINS.has(CONCEPTS.cash), false);
+  assert.equal(LATEST_WINS_CHAINS.has(CONCEPTS.longTermDebt), false);
+});
